@@ -33,11 +33,12 @@ struct Sink {
 };
 
 struct TimerRef {
-    QString kind;  // setInterval or setTimeout
-    qint64 ms = 0;  // 0 when not a literal
+    QString kind;  // setInterval, setTimeout or alarm (chrome.alarms.create)
+    qint64 ms = 0;  // 0 when the period could not be resolved
     bool stringBody = false;
     QString file;
     int line = 0;
+    QString argName;  // identifier used as the period, resolved against file-level constants
 };
 
 struct ListenerRef {
@@ -52,6 +53,7 @@ struct ObfuscationStats {
     int atobCalls = 0;
     int hexEscapedStrings = 0;
     int obfuscatorIdentifiers = 0;  // _0x1a2b style names
+    int invisibleChars = 0;         // bidi overrides, isolates, zero-width and BOM characters
     int total() const {
         return longBase64Literals + fromCharCodeCalls + atobCalls + hexEscapedStrings +
                obfuscatorIdentifiers;
@@ -72,6 +74,7 @@ struct CodeFacts {
     QStringList securityHeaderLiterals;  // content-security-policy, x-frame-options, ...
     bool dynamicUrls = false;         // template URL with a substituted host
     ObfuscationStats obfuscation;
+    QStringList warnings;             // reasons the analysis is incomplete (depth limit, parse errors)
 };
 
 // Analyzes JavaScript. With a LineMap (from prettifyJavaScript on the same tree) the reported

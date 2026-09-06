@@ -13,8 +13,12 @@ namespace extwatch {
 
 struct SourceFile {
     QString path;  // relative, forward slashes
-    QByteArray content;
+    QByteArray content;  // may be empty for files that are not analyzed
+    qint64 size = 0;     // size on disk, valid even when content was not loaded
 };
+
+// Files whose content the analysis reads: JavaScript, HTML and JSON.
+bool isAnalyzablePath(const QString& path);
 
 // A header modification declared in a static declarativeNetRequest ruleset.
 struct DnrHeaderMod {
@@ -32,6 +36,13 @@ struct FileSummary {
     bool parseError = false;
 };
 
+// A declarativeNetRequest redirect action.
+struct DnrRedirect {
+    QString ruleset;
+    int ruleId = 0;
+    QString target;  // url, regexSubstitution or transform summary
+};
+
 // The behavior signature of one extension version: what the manifest declares plus what the
 // code can do. Two signatures are compared by the rules engine to produce findings.
 struct Signature {
@@ -41,7 +52,11 @@ struct Signature {
     ManifestFacts manifest;
 
     QList<DnrHeaderMod> headerMods;
+    QList<DnrRedirect> redirects;
+    int allowAllRequestsRules = 0;
     int dnrRuleCount = 0;
+    QStringList wasmFiles;
+    QStringList analysisWarnings;  // "file: reason" for every place the analysis was incomplete
 
     QList<FileSummary> files;
     qint64 totalBytes = 0;
@@ -70,8 +85,9 @@ struct Signature {
     static Signature fromJson(const QJsonObject& json);
 };
 
-// Reads every regular file under `dir` into memory.
-QList<SourceFile> loadSourcesFromDir(const QString& dir);
+// Reads every regular file under `dir`. With contentForAll false only analyzable files are read
+// into memory; the rest keep name and size.
+QList<SourceFile> loadSourcesFromDir(const QString& dir, bool contentForAll = true);
 
 // Builds the signature. JavaScript is prettified before analysis so line numbers match the
 // diff viewer. `expectedId` enables the key check when non-empty.

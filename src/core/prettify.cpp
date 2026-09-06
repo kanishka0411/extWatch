@@ -292,7 +292,7 @@ struct Printer {
         const uint32_t count = ts_node_child_count(n);
         const quint16 sym = ts_node_symbol(n);
 
-        if (depth > 600) {
+        if (depth > 400) {
             put(text(n), sym, true, parentKind, false, ts_node_start_byte(n), true);
             return;
         }

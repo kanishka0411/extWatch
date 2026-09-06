@@ -5,6 +5,7 @@
 #include <QRegularExpression>
 #include <QSet>
 #include <cstring>
+#include <string>
 #include <string_view>
 
 namespace extwatch {
@@ -59,6 +60,8 @@ struct Walker {
     QSet<QString> fingerprintSet;
     QSet<QString> headerSet;
     QHash<QString, int> domainIndex;
+    QHash<QString, qint64> constants;  // const FIVE_MINUTES = 5 * 60 * 1000
+    bool depthExceeded = false;
 
     sv view(TSNode n) const {
         const uint32_t a = ts_node_start_byte(n);
@@ -281,25 +284,55 @@ struct Walker {
         return any ? product : 0;
     }
 
+    // Normalizes a callee for comparison: strips window./self./globalThis., maps browser.* to
+    // chrome.*, and unwraps the (0, eval) and globalThis["eval"] spellings.
+    static std::string normalizeCallee(sv callee) {
+        std::string c(callee);
+        for (const char* prefix : {"window.", "self.", "globalThis."}) {
+            const size_t len = std::strlen(prefix);
+            if (c.compare(0, len, prefix) == 0) {
+                c.erase(0, len);
+                break;
+            }
+        }
+        if (c.compare(0, 8, "browser.") == 0) {
+            c.replace(0, 8, "chrome.");
+        }
+        if (!c.empty() && c.front() == '(' && c.back() == ')') {
+            // (0, eval) or (0, window.eval)
+            const size_t comma = c.rfind(',');
+            std::string inner = comma == std::string::npos ? c.substr(1, c.size() - 2) : c.substr(comma + 1, c.size() - comma - 2);
+            while (!inner.empty() && inner.front() == ' ') inner.erase(0, 1);
+            while (!inner.empty() && inner.back() == ' ') inner.pop_back();
+            c = normalizeCallee(inner);
+        }
+        for (const char* form : {"[\"eval\"]", "['eval']"}) {
+            if (c.size() >= std::strlen(form) && c.compare(c.size() - std::strlen(form), std::strlen(form), form) == 0) {
+                c = "eval";
+            }
+        }
+        return c;
+    }
+
     void scanCall(TSNode call) {
-        const sv callee = calleeName(call);
-        if (callee.empty()) {
+        const sv rawCallee = calleeName(call);
+        if (rawCallee.empty()) {
             return;
         }
+        const std::string normalized = normalizeCallee(rawCallee);
+        const sv callee(normalized);
         const TSNode args = field(call, "arguments");
         const uint32_t argCount = ts_node_is_null(args) ? 0 : ts_node_named_child_count(args);
         auto arg = [&](uint32_t i) { return ts_node_named_child(args, i); };
         const sv last = lastSegment(callee);
 
-        if (callee == "eval" || callee == "window.eval" || callee == "globalThis.eval" || callee == "self.eval") {
+        if (callee == "eval") {
             addSink("eval", call);
-        } else if (last == "setTimeout" || last == "setInterval") {
-            if (!(callee == last || startsWith(callee, "window.") || startsWith(callee, "self.") ||
-                  startsWith(callee, "globalThis."))) {
-                return;
-            }
+        } else if (callee == "Function") {
+            addSink("new_function", call);  // Function(payload)() without new
+        } else if (callee == "setTimeout" || callee == "setInterval") {
             TimerRef t;
-            t.kind = QString::fromUtf8(last.data(), static_cast<qsizetype>(last.size()));
+            t.kind = QString::fromUtf8(callee.data(), static_cast<qsizetype>(callee.size()));
             t.file = facts.file;
             t.line = line(call);
             if (argCount >= 1 && isStringLike(arg(0))) {
@@ -308,8 +341,50 @@ struct Walker {
             }
             if (argCount >= 2) {
                 t.ms = numericPeriod(arg(1));
+                if (t.ms == 0 && typeIs(arg(1), "identifier")) {
+                    t.argName = text(arg(1));
+                }
             }
             facts.timers.append(t);
+        } else if (callee == "chrome.alarms.create") {
+            // chrome.alarms.create(name?, { periodInMinutes: 5 }) is the service-worker-friendly poll timer.
+            TimerRef t;
+            t.kind = QStringLiteral("alarm");
+            t.file = facts.file;
+            t.line = line(call);
+            for (uint32_t i = 0; i < argCount; ++i) {
+                const TSNode a = arg(i);
+                if (!typeIs(a, "object")) {
+                    continue;
+                }
+                const uint32_t pairs = ts_node_named_child_count(a);
+                for (uint32_t k = 0; k < pairs; ++k) {
+                    const TSNode pair = ts_node_named_child(a, k);
+                    if (!typeIs(pair, "pair")) {
+                        continue;
+                    }
+                    const TSNode key = field(pair, "key");
+                    const TSNode value = field(pair, "value");
+                    if (ts_node_is_null(key) || ts_node_is_null(value)) {
+                        continue;
+                    }
+                    const sv keyText = view(key);
+                    if (keyText == "periodInMinutes" || keyText == "\"periodInMinutes\"" || keyText == "'periodInMinutes'") {
+                        const sv v = view(value);
+                        const double minutes = QByteArray(v.data(), static_cast<qsizetype>(v.size())).toDouble();
+                        if (minutes > 0) {
+                            t.ms = static_cast<qint64>(minutes * 60000.0);
+                        }
+                    }
+                }
+            }
+            facts.timers.append(t);
+        } else if (callee == "chrome.scripting.registerContentScripts" ||
+                   callee == "chrome.scripting.updateContentScripts" || callee == "chrome.userScripts.register") {
+            addSink("register_content_scripts", call);
+        } else if (startsWith(callee, "WebAssembly.") &&
+                   (last == "instantiate" || last == "instantiateStreaming" || last == "compile" || last == "compileStreaming")) {
+            addSink("wasm_instantiate", call);
         } else if (last == "importScripts") {
             bool remote = false;
             bool dynamic = false;
@@ -464,6 +539,21 @@ struct Walker {
                 case NodeKind::AssignmentExpression:
                     scanAssignment(n);
                     break;
+                case NodeKind::Other:
+                    if (typeIs(n, "variable_declarator")) {
+                        const TSNode name = field(n, "name");
+                        const TSNode value = field(n, "value");
+                        if (!ts_node_is_null(name) && !ts_node_is_null(value) && typeIs(name, "identifier")) {
+                            const qint64 ms = numericPeriod(value);
+                            if (ms > 0) {
+                                const QString id = text(name);
+                                if (!constants.contains(id)) {
+                                    constants.insert(id, ms);
+                                }
+                            }
+                        }
+                    }
+                    break;
                 case NodeKind::Identifier:
                 case NodeKind::PropertyIdentifier: {
                     const sv id = view(n);
@@ -479,7 +569,11 @@ struct Walker {
                     break;
             }
         }
-        if (depth > 800 || ts_node_child_count(n) == 0) {
+        if (depth > 400) {
+            depthExceeded = true;
+            return;
+        }
+        if (ts_node_child_count(n) == 0) {
             return;
         }
         TSTreeCursor cursor = ts_tree_cursor_new(n);
@@ -509,6 +603,34 @@ CodeFacts analyzeJavaScript(const QString& file, const JsTree& parsed, const Lin
         facts.parseError = true;
     }
     w.visit(root, 0);
+    for (TimerRef& t : facts.timers) {
+        if (t.ms == 0 && !t.argName.isEmpty()) {
+            t.ms = w.constants.value(t.argName, 0);
+        }
+    }
+    if (w.depthExceeded) {
+        facts.warnings.append(QStringLiteral("nesting deeper than 400 levels was not analyzed"));
+    }
+    if (facts.parseError) {
+        facts.warnings.append(QStringLiteral("parse errors; some code may be skipped"));
+    }
+    // Bidirectional overrides and isolates, zero-width characters and stray BOMs can make code
+    // read differently from how it runs (Trojan Source).
+    for (qsizetype i = 0; i + 2 < src.size(); ++i) {
+        const unsigned char a = static_cast<unsigned char>(src.at(i));
+        if (a != 0xE2 && a != 0xEF) {
+            continue;
+        }
+        const unsigned char b = static_cast<unsigned char>(src.at(i + 1));
+        const unsigned char c = static_cast<unsigned char>(src.at(i + 2));
+        const bool bidi = a == 0xE2 && b == 0x80 && c >= 0xAA && c <= 0xAE;      // U+202A..U+202E
+        const bool isolate = a == 0xE2 && b == 0x81 && c >= 0xA6 && c <= 0xA9;   // U+2066..U+2069
+        const bool zeroWidth = a == 0xE2 && b == 0x80 && c >= 0x8B && c <= 0x8D; // U+200B..U+200D
+        const bool bom = a == 0xEF && b == 0xBB && c == 0xBF && i > 0;           // U+FEFF inside the file
+        if (bidi || isolate || zeroWidth || bom) {
+            facts.obfuscation.invisibleChars++;
+        }
+    }
     facts.chromeApis = QStringList(w.apiSet.begin(), w.apiSet.end());
     facts.chromeApis.sort();
     facts.fingerprinting = QStringList(w.fingerprintSet.begin(), w.fingerprintSet.end());

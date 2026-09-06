@@ -20,10 +20,22 @@
             "title": "Gains access to more websites"
         },
         {
-            "explanation": "Content scripts now match more URLs, run in all frames, or run before the page loads.",
+            "explanation": "Content scripts now match more URLs, run in all frames, run before the page loads, or reach about:/data:/blob: frames.",
             "id": "content_scripts.broadened",
             "severity": "medium",
             "title": "Injects code into more pages or frames"
+        },
+        {
+            "explanation": "A content script with world MAIN shares the page's JavaScript environment: it can read page variables, hook APIs and bypass the isolated world.",
+            "id": "content_scripts.main_world",
+            "severity": "high",
+            "title": "Runs in the page's own JavaScript world"
+        },
+        {
+            "explanation": "chrome.scripting.registerContentScripts or userScripts.register can inject into pages the manifest never mentions.",
+            "id": "scripting.register",
+            "severity": "medium",
+            "title": "Registers content scripts at runtime"
         },
         {
             "explanation": "APIs such as cookies, history, webRequest, tabs, scripting, debugger or nativeMessaging expose browsing data or code execution.",
@@ -104,6 +116,24 @@
             "title": "Removes security headers from web pages"
         },
         {
+            "explanation": "A declarativeNetRequest rule sets or appends Content-Security-Policy, X-Frame-Options or similar headers; a strict value is fine, a weakened one is not.",
+            "id": "headers.modify",
+            "severity": "medium",
+            "title": "Rewrites security headers on web pages"
+        },
+        {
+            "explanation": "A declarativeNetRequest redirect rule sends matching requests somewhere else; redirecting a login or update URL is a classic hijack.",
+            "id": "dnr.redirect",
+            "severity": "high",
+            "title": "Redirects requests"
+        },
+        {
+            "explanation": "allowAllRequests rules switch off every blocking rule for matching frames.",
+            "id": "dnr.allow_all_requests",
+            "severity": "medium",
+            "title": "Exempts whole pages from blocking rules"
+        },
+        {
             "explanation": "Dynamic declarativeNetRequest rules or webRequest header listeners can rewrite traffic in ways not visible in the package.",
             "id": "headers.dynamic_rules",
             "severity": "medium",
@@ -182,6 +212,18 @@
             "title": "Updates from a different server"
         },
         {
+            "explanation": "The listing is offered by a different developer than before. Extensions that turn malicious are usually sold first.",
+            "id": "publisher.changed",
+            "severity": "high",
+            "title": "Web Store publisher changed"
+        },
+        {
+            "explanation": "The listing disappeared, often because Google took it down for policy violations, while the installed copy keeps running.",
+            "id": "store.removed",
+            "severity": "medium",
+            "title": "Removed from the Web Store"
+        },
+        {
             "explanation": "A different key means a different publisher signed this version.",
             "id": "key.changed",
             "severity": "high",
@@ -198,6 +240,30 @@
             "id": "obfuscation.increased",
             "severity": "medium",
             "title": "Code became obfuscated"
+        },
+        {
+            "explanation": "Right-to-left overrides, isolates, zero-width characters or stray byte-order marks can make code read differently from how it runs (Trojan Source).",
+            "id": "unicode.invisible",
+            "severity": "high",
+            "title": "Source contains invisible or bidirectional characters"
+        },
+        {
+            "explanation": "New .wasm modules are opaque to code review; their imports and behavior are not analyzed.",
+            "id": "wasm.added",
+            "severity": "medium",
+            "title": "Ships WebAssembly"
+        },
+        {
+            "explanation": "WebAssembly.instantiate or compile is called.",
+            "id": "wasm.instantiate",
+            "severity": "low",
+            "title": "Loads WebAssembly at runtime"
+        },
+        {
+            "explanation": "Some files were too large, too deeply nested or could not be read. Absence of findings there means nothing.",
+            "id": "analysis.incomplete",
+            "severity": "low",
+            "title": "Analysis was incomplete"
         },
         {
             "explanation": "New static declarativeNetRequest rules.",

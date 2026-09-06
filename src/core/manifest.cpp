@@ -11,6 +11,12 @@
 
 namespace extwatch {
 
+QString ContentScript::key() const {
+    QStringList sorted = js;
+    sorted.sort();
+    return sorted.join(u'|');
+}
+
 bool isMatchPattern(const QString& s) {
     return s == QStringLiteral("<all_urls>") || s.contains(QStringLiteral("://"));
 }
@@ -82,9 +88,13 @@ ContentScript parseContentScript(const QJsonObject& o) {
     cs.excludeMatches = toStringList(o.value(QStringLiteral("exclude_matches")));
     cs.js = toStringList(o.value(QStringLiteral("js")));
     cs.css = toStringList(o.value(QStringLiteral("css")));
+    cs.includeGlobs = toStringList(o.value(QStringLiteral("include_globs")));
+    cs.excludeGlobs = toStringList(o.value(QStringLiteral("exclude_globs")));
     cs.runAt = o.value(QStringLiteral("run_at")).toString();
+    cs.world = o.value(QStringLiteral("world")).toString().toUpper();
     cs.allFrames = o.value(QStringLiteral("all_frames")).toBool(false);
     cs.matchAboutBlank = o.value(QStringLiteral("match_about_blank")).toBool(false);
+    cs.matchOriginAsFallback = o.value(QStringLiteral("match_origin_as_fallback")).toBool(false);
     return cs;
 }
 
@@ -98,10 +108,22 @@ QJsonObject contentScriptToJson(const ContentScript& cs) {
     if (!cs.css.isEmpty()) {
         o.insert(QStringLiteral("css"), fromStringList(cs.css));
     }
+    if (!cs.includeGlobs.isEmpty()) {
+        o.insert(QStringLiteral("include_globs"), fromStringList(cs.includeGlobs));
+    }
+    if (!cs.excludeGlobs.isEmpty()) {
+        o.insert(QStringLiteral("exclude_globs"), fromStringList(cs.excludeGlobs));
+    }
     if (!cs.runAt.isEmpty()) {
         o.insert(QStringLiteral("run_at"), cs.runAt);
     }
+    if (!cs.world.isEmpty()) {
+        o.insert(QStringLiteral("world"), cs.world);
+    }
     o.insert(QStringLiteral("all_frames"), cs.allFrames);
+    if (cs.matchOriginAsFallback) {
+        o.insert(QStringLiteral("match_origin_as_fallback"), true);
+    }
     return o;
 }
 

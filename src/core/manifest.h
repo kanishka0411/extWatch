@@ -13,11 +13,17 @@ namespace extwatch {
 struct ContentScript {
     QStringList matches;
     QStringList excludeMatches;
+    QStringList includeGlobs;
+    QStringList excludeGlobs;
     QStringList js;
     QStringList css;
     QString runAt;
+    QString world;  // ISOLATED (default) or MAIN
     bool allFrames = false;
     bool matchAboutBlank = false;
+    bool matchOriginAsFallback = false;  // also injects into about:, data:, blob: frames
+
+    QString key() const;  // sorted js files, identifies the declaration across versions
 };
 
 struct RuleResource {

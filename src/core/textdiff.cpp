@@ -65,13 +65,30 @@ LineDiff diffLines(const QStringList& oldLines, const QStringList& newLines, int
                 line.text = oldLines.at(oldIdx - 1);
                 result.removed++;
                 break;
-            default:
+            default: {
+                // Hashes are only candidates for equality; a collision must not hide a change.
+                const QString& oldText = oldLines.at(oldIdx);
+                const QString& newText = newLines.at(newIdx);
+                if (oldText != newText) {
+                    DiffLine removed;
+                    removed.kind = LineKind::Removed;
+                    removed.oldLine = ++oldIdx;
+                    removed.text = oldText;
+                    result.lines.append(removed);
+                    result.removed++;
+                    line.kind = LineKind::Added;
+                    line.newLine = ++newIdx;
+                    line.text = newText;
+                    result.added++;
+                    break;
+                }
                 line.kind = LineKind::Context;
                 line.oldLine = ++oldIdx;
                 line.newLine = ++newIdx;
-                line.text = newLines.at(newIdx - 1);
+                line.text = newText;
                 result.common++;
                 break;
+            }
         }
         result.lines.append(line);
     }

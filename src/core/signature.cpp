@@ -6,6 +6,8 @@
 #include <QJsonArray>
 #include <QJsonDocument>
 #include <QSet>
+#include <QThread>
+#include <QThreadPool>
 #include <QtConcurrent/QtConcurrent>
 #include <algorithm>
 
@@ -47,18 +49,31 @@ QList<Sink> Signature::sinksInFile(const QString& file) const {
     return out;
 }
 
-QList<SourceFile> loadSourcesFromDir(const QString& dir) {
+bool isAnalyzablePath(const QString& path) {
+    const QString lower = path.toLower();
+    return isJavaScriptPath(lower) || lower.endsWith(QStringLiteral(".html")) ||
+           lower.endsWith(QStringLiteral(".htm")) || lower.endsWith(QStringLiteral(".json"));
+}
+
+QList<SourceFile> loadSourcesFromDir(const QString& dir, bool contentForAll) {
     QList<SourceFile> out;
     const QDir root(dir);
     QDirIterator it(dir, QDir::Files | QDir::Hidden | QDir::NoSymLinks | QDir::NoDotAndDotDot,
                     QDirIterator::Subdirectories);
     while (it.hasNext()) {
         const QFileInfo fi = it.nextFileInfo();
-        QFile f(fi.filePath());
-        if (!f.open(QIODevice::ReadOnly)) {
-            continue;
+        SourceFile file;
+        file.path = root.relativeFilePath(fi.filePath());
+        file.size = fi.size();
+        if (contentForAll || isAnalyzablePath(file.path)) {
+            QFile f(fi.filePath());
+            if (!f.open(QIODevice::ReadOnly)) {
+                continue;
+            }
+            file.content = f.readAll();
+            file.size = file.content.size();
         }
-        out.append({root.relativeFilePath(fi.filePath()), f.readAll()});
+        out.append(file);
     }
     std::sort(out.begin(), out.end(),
               [](const SourceFile& a, const SourceFile& b) { return a.path < b.path; });
@@ -103,7 +118,28 @@ void collectDnr(const ManifestFacts& manifest, const QList<SourceFile>& files, S
                 const QJsonObject rule = rv.toObject();
                 sig.dnrRuleCount++;
                 const QJsonObject action = rule.value(QStringLiteral("action")).toObject();
-                if (action.value(QStringLiteral("type")).toString() != QStringLiteral("modifyHeaders")) {
+                const QString type = action.value(QStringLiteral("type")).toString();
+                if (type == QStringLiteral("allowAllRequests")) {
+                    sig.allowAllRequestsRules++;
+                    continue;
+                }
+                if (type == QStringLiteral("redirect")) {
+                    const QJsonObject redirect = action.value(QStringLiteral("redirect")).toObject();
+                    QString target = redirect.value(QStringLiteral("url")).toString();
+                    if (target.isEmpty()) {
+                        target = redirect.value(QStringLiteral("regexSubstitution")).toString();
+                    }
+                    if (target.isEmpty() && redirect.contains(QStringLiteral("transform"))) {
+                        const QJsonObject t = redirect.value(QStringLiteral("transform")).toObject();
+                        target = QStringLiteral("transform host=%1 scheme=%2").arg(t.value(QStringLiteral("host")).toString(), t.value(QStringLiteral("scheme")).toString());
+                    }
+                    if (target.isEmpty() && redirect.contains(QStringLiteral("extensionPath"))) {
+                        target = QStringLiteral("extension path ") + redirect.value(QStringLiteral("extensionPath")).toString();
+                    }
+                    sig.redirects.append({rr.id, rule.value(QStringLiteral("id")).toInt(), target});
+                    continue;
+                }
+                if (type != QStringLiteral("modifyHeaders")) {
                     continue;
                 }
                 for (const char* key : {"responseHeaders", "requestHeaders"}) {
@@ -161,6 +197,7 @@ void mergeFacts(Signature& sig, const CodeFacts& facts, QHash<QString, int>& dom
     sig.obfuscation.atobCalls += facts.obfuscation.atobCalls;
     sig.obfuscation.hexEscapedStrings += facts.obfuscation.hexEscapedStrings;
     sig.obfuscation.obfuscatorIdentifiers += facts.obfuscation.obfuscatorIdentifiers;
+    sig.obfuscation.invisibleChars += facts.obfuscation.invisibleChars;
 }
 
 }  // namespace
@@ -183,15 +220,25 @@ Signature buildSignature(const ManifestFacts& manifest, const QList<SourceFile>&
 
     // Per-file analysis is independent and CPU-bound: run it in parallel, then merge in file
     // order so the result is deterministic.
+    constexpr qint64 kMaxAnalyzedBytes = 48LL * 1024 * 1024;
     struct FileResult {
         FileSummary summary;
         QList<CodeFacts> facts;
         QStringList remoteScripts;
+        QStringList warnings;
     };
     const auto analyzeOne = [](const SourceFile& f) {
         FileResult r;
         r.summary.path = f.path;
-        r.summary.bytes = f.content.size();
+        r.summary.bytes = f.size > 0 ? f.size : f.content.size();
+        if (isAnalyzablePath(f.path) && f.content.isEmpty() && f.size > 0) {
+            r.warnings.append(QStringLiteral("%1: content not available for analysis").arg(f.path));
+            return r;
+        }
+        if (isAnalyzablePath(f.path) && f.content.size() > kMaxAnalyzedBytes) {
+            r.warnings.append(QStringLiteral("%1: larger than 48 MiB, not analyzed").arg(f.path));
+            return r;
+        }
         if (isJavaScriptPath(f.path)) {
             // Parse once; analyze the original bytes but report prettified line numbers.
             const JsTree parsed(f.content);
@@ -202,6 +249,9 @@ Signature buildSignature(const ManifestFacts& manifest, const QList<SourceFile>&
             r.summary.analyzed = true;
             r.summary.lines = facts.lineCount;
             r.summary.parseError = facts.parseError;
+            for (const QString& w : facts.warnings) {
+                r.warnings.append(QStringLiteral("%1: %2").arg(f.path, w));
+            }
             r.facts.append(facts);
         } else if (f.path.endsWith(QStringLiteral(".html"), Qt::CaseInsensitive) ||
                    f.path.endsWith(QStringLiteral(".htm"), Qt::CaseInsensitive)) {
@@ -222,7 +272,15 @@ Signature buildSignature(const ManifestFacts& manifest, const QList<SourceFile>&
         }
         return r;
     };
-    const QList<FileResult> results = QtConcurrent::blockingMapped(files, analyzeOne);
+    // A bounded, low-priority pool: the tray app must stay invisible while it analyzes.
+    static QThreadPool* const pool = [] {
+        auto* p = new QThreadPool;
+        p->setMaxThreadCount(qMax(1, QThread::idealThreadCount() / 2));
+        p->setThreadPriority(QThread::LowPriority);
+        p->setStackSize(16 * 1024 * 1024);  // the walkers recurse; default worker stacks are 512 KiB on macOS
+        return p;
+    }();
+    const QList<FileResult> results = QtConcurrent::blockingMapped(pool, files, analyzeOne);
 
     QHash<QString, int> domainIndex;
     QSet<QString> apis;
@@ -232,6 +290,10 @@ Signature buildSignature(const ManifestFacts& manifest, const QList<SourceFile>&
         sig.totalBytes += r.summary.bytes;
         sig.files.append(r.summary);
         sig.remoteScriptSources += r.remoteScripts;
+        sig.analysisWarnings += r.warnings;
+        if (r.summary.path.endsWith(QStringLiteral(".wasm"), Qt::CaseInsensitive)) {
+            sig.wasmFiles.append(r.summary.path);
+        }
         for (const CodeFacts& facts : r.facts) {
             mergeFacts(sig, facts, domainIndex, apis, fingerprints, headers);
         }
@@ -285,7 +347,19 @@ QJsonObject Signature::toJson() const {
         mods.append(ho);
     }
     o.insert(QStringLiteral("dnr_header_mods"), mods);
+    QJsonArray redirectsJson;
+    for (const DnrRedirect& r : redirects) {
+        QJsonObject ro;
+        ro.insert(QStringLiteral("ruleset"), r.ruleset);
+        ro.insert(QStringLiteral("rule_id"), r.ruleId);
+        ro.insert(QStringLiteral("target"), r.target);
+        redirectsJson.append(ro);
+    }
+    o.insert(QStringLiteral("dnr_redirects"), redirectsJson);
+    o.insert(QStringLiteral("dnr_allow_all_requests"), allowAllRequestsRules);
     o.insert(QStringLiteral("dnr_rule_count"), dnrRuleCount);
+    o.insert(QStringLiteral("wasm_files"), fromStringList(wasmFiles));
+    o.insert(QStringLiteral("analysis_warnings"), fromStringList(analysisWarnings));
 
     QJsonArray fs;
     for (const FileSummary& f : files) {
@@ -359,6 +433,7 @@ QJsonObject Signature::toJson() const {
     ob.insert(QStringLiteral("atob_calls"), obfuscation.atobCalls);
     ob.insert(QStringLiteral("hex_escaped_strings"), obfuscation.hexEscapedStrings);
     ob.insert(QStringLiteral("obfuscator_identifiers"), obfuscation.obfuscatorIdentifiers);
+    ob.insert(QStringLiteral("invisible_chars"), obfuscation.invisibleChars);
     o.insert(QStringLiteral("obfuscation"), ob);
     return o;
 }
@@ -385,6 +460,14 @@ Signature Signature::fromJson(const QJsonObject& o) {
                              h.value(QStringLiteral("operation")).toString()});
     }
     s.dnrRuleCount = o.value(QStringLiteral("dnr_rule_count")).toInt();
+    for (const QJsonValue& v : o.value(QStringLiteral("dnr_redirects")).toArray()) {
+        const QJsonObject r = v.toObject();
+        s.redirects.append({r.value(QStringLiteral("ruleset")).toString(), r.value(QStringLiteral("rule_id")).toInt(),
+                            r.value(QStringLiteral("target")).toString()});
+    }
+    s.allowAllRequestsRules = o.value(QStringLiteral("dnr_allow_all_requests")).toInt();
+    s.wasmFiles = toStringList(o.value(QStringLiteral("wasm_files")));
+    s.analysisWarnings = toStringList(o.value(QStringLiteral("analysis_warnings")));
     for (const QJsonValue& v : o.value(QStringLiteral("files")).toArray()) {
         const QJsonObject f = v.toObject();
         s.files.append({f.value(QStringLiteral("path")).toString(),
@@ -437,6 +520,7 @@ Signature Signature::fromJson(const QJsonObject& o) {
     s.obfuscation.atobCalls = ob.value(QStringLiteral("atob_calls")).toInt();
     s.obfuscation.hexEscapedStrings = ob.value(QStringLiteral("hex_escaped_strings")).toInt();
     s.obfuscation.obfuscatorIdentifiers = ob.value(QStringLiteral("obfuscator_identifiers")).toInt();
+    s.obfuscation.invisibleChars = ob.value(QStringLiteral("invisible_chars")).toInt();
     return s;
 }
 

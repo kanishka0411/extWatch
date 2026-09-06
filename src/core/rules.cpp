@@ -89,7 +89,11 @@ const QList<RuleInfo> kRules = {
     RULE("host.broadened", Medium, "Gains access to more websites",
          "New host patterns were added to host_permissions or content script matches."),
     RULE("content_scripts.broadened", Medium, "Injects code into more pages or frames",
-         "Content scripts now match more URLs, run in all frames, or run before the page loads."),
+         "Content scripts now match more URLs, run in all frames, run before the page loads, or reach about:/data:/blob: frames."),
+    RULE("content_scripts.main_world", High, "Runs in the page's own JavaScript world",
+         "A content script with world MAIN shares the page's JavaScript environment: it can read page variables, hook APIs and bypass the isolated world."),
+    RULE("scripting.register", Medium, "Registers content scripts at runtime",
+         "chrome.scripting.registerContentScripts or userScripts.register can inject into pages the manifest never mentions."),
     RULE("permission.sensitive", Medium, "Requests a sensitive browser API",
          "APIs such as cookies, history, webRequest, tabs, scripting, debugger or nativeMessaging expose browsing data or code execution."),
     RULE("permission.added", Low, "Requests a new browser API", "A new API permission that is not in the sensitive set."),
@@ -111,6 +115,12 @@ const QList<RuleInfo> kRules = {
     RULE("network.dynamic_url", Low, "Builds request URLs at runtime", "The host of a request is computed, so it cannot be read from the code."),
     RULE("headers.strip_security", High, "Removes security headers from web pages",
          "A declarativeNetRequest rule or webRequest listener removes or rewrites Content-Security-Policy, X-Frame-Options or similar headers, disabling the protections of every site."),
+    RULE("headers.modify", Medium, "Rewrites security headers on web pages",
+         "A declarativeNetRequest rule sets or appends Content-Security-Policy, X-Frame-Options or similar headers; a strict value is fine, a weakened one is not."),
+    RULE("dnr.redirect", High, "Redirects requests",
+         "A declarativeNetRequest redirect rule sends matching requests somewhere else; redirecting a login or update URL is a classic hijack."),
+    RULE("dnr.allow_all_requests", Medium, "Exempts whole pages from blocking rules",
+         "allowAllRequests rules switch off every blocking rule for matching frames."),
     RULE("headers.dynamic_rules", Medium, "Changes network rules at runtime",
          "Dynamic declarativeNetRequest rules or webRequest header listeners can rewrite traffic in ways not visible in the package."),
     RULE("scripting.execute", Medium, "Injects scripts into tabs programmatically", "chrome.scripting.executeScript or tabs.executeScript runs code in web pages on demand."),
@@ -132,6 +142,12 @@ const QList<RuleInfo> kRules = {
     RULE("key.changed", High, "Signing key changed", "A different key means a different publisher signed this version."),
     RULE("key.mismatch", High, "Files were not signed for this ID", "The key in manifest.json does not derive to the extension ID; the files were tampered with or sideloaded."),
     RULE("obfuscation.increased", Medium, "Code became obfuscated", "Long encoded strings, hex escapes, atob/fromCharCode or _0x identifiers appeared."),
+    RULE("unicode.invisible", High, "Source contains invisible or bidirectional characters",
+         "Right-to-left overrides, isolates, zero-width characters or stray byte-order marks can make code read differently from how it runs (Trojan Source)."),
+    RULE("wasm.added", Medium, "Ships WebAssembly", "New .wasm modules are opaque to code review; their imports and behavior are not analyzed."),
+    RULE("wasm.instantiate", Low, "Loads WebAssembly at runtime", "WebAssembly.instantiate or compile is called."),
+    RULE("analysis.incomplete", Low, "Analysis was incomplete",
+         "Some files were too large, too deeply nested or could not be read. Absence of findings there means nothing."),
     RULE("dnr.rules_added", Low, "Adds network rules", "New static declarativeNetRequest rules."),
     RULE("web_accessible_resources.changed", Low, "Exposes resources to websites", "web_accessible_resources changed; pages can load these files."),
     RULE("size.large_change", Low, "Package size changed a lot", "Total code size grew or shrank by more than half."),
@@ -164,6 +180,15 @@ Finding make(const char* id, const QString& detail, const QString& file = QStrin
     f.file = file;
     f.line = line;
     return f;
+}
+
+bool hostIs(const QString& host, const QString& domain) {
+    return host == domain || host.endsWith(u'.' + domain);
+}
+
+bool isFirstPartyHost(const QString& host, const ManifestFacts& manifest) {
+    const QString home = QUrl(manifest.homepageUrl).host().toLower();
+    return !home.isEmpty() && (host == home || host.endsWith(u'.' + home) || home.endsWith(u'.' + host));
 }
 
 bool isBroadPattern(const QString& p) {
@@ -306,6 +331,28 @@ QList<Finding> compareSignatures(const Signature& before, const Signature& after
     const ManifestFacts& bm = before.manifest;
     const ManifestFacts& am = after.manifest;
 
+    // --- code sink identity helper, used throughout
+    // A sink is new when the previous version had no sink of that kind in the same file, so a
+    // second eval appearing in a different file is not hidden by an existing one.
+    auto newSinksOfKinds = [&](const QStringList& kinds) {
+        QList<Sink> found;
+        for (const QString& k : kinds) {
+            for (const Sink& s : after.sinksOfKind(k)) {
+                bool seen = false;
+                for (const Sink& b : before.sinksOfKind(k)) {
+                    if (b.file == s.file) {
+                        seen = true;
+                        break;
+                    }
+                }
+                if (!seen) {
+                    found.append(s);
+                }
+            }
+        }
+        return found;
+    };
+
     // --- hosts and content scripts
     const QStringList newHosts = newItems(allHostPatterns(before), allHostPatterns(after));
     QStringList broad;
@@ -324,29 +371,46 @@ QList<Finding> compareSignatures(const Signature& before, const Signature& after
                         QString(), 0, baseline ? std::optional<Severity>(Severity::Low) : std::nullopt));
     }
     {
-        bool allFramesBefore = false;
-        bool startBefore = false;
+        QHash<QString, const ContentScript*> beforeByKey;
         for (const ContentScript& cs : bm.contentScripts) {
-            allFramesBefore = allFramesBefore || cs.allFrames;
-            startBefore = startBefore || cs.runAt == QStringLiteral("document_start");
+            if (!beforeByKey.contains(cs.key())) {
+                beforeByKey.insert(cs.key(), &cs);
+            }
         }
         QStringList changes;
+        QStringList mainWorld;
         for (const ContentScript& cs : am.contentScripts) {
-            if (cs.allFrames && !allFramesBefore) {
-                changes.append(QStringLiteral("runs in all frames"));
-                allFramesBefore = true;
+            const QString name = cs.js.isEmpty() ? cs.css.join(QStringLiteral(", ")) : cs.js.join(QStringLiteral(", "));
+            const ContentScript* b = beforeByKey.value(cs.key(), nullptr);
+            if (!b) {
+                if (!baseline) {
+                    changes.append(QStringLiteral("new content script %1 on %2").arg(name, joinLimited(cs.matches, 3)));
+                } else {
+                    if (cs.allFrames) changes.append(QStringLiteral("%1 runs in all frames").arg(name));
+                    if (cs.runAt == QStringLiteral("document_start")) changes.append(QStringLiteral("%1 runs at document_start").arg(name));
+                    if (cs.matchOriginAsFallback) changes.append(QStringLiteral("%1 also injects into about:/data:/blob: frames").arg(name));
+                }
+                if (cs.world == QStringLiteral("MAIN")) {
+                    mainWorld.append(name);
+                }
+                continue;
             }
-            if (cs.runAt == QStringLiteral("document_start") && !startBefore) {
-                changes.append(QStringLiteral("runs at document_start"));
-                startBefore = true;
-            }
+            if (cs.allFrames && !b->allFrames) changes.append(QStringLiteral("%1 now runs in all frames").arg(name));
+            if (cs.runAt == QStringLiteral("document_start") && b->runAt != QStringLiteral("document_start")) changes.append(QStringLiteral("%1 now runs at document_start").arg(name));
+            if (cs.matchOriginAsFallback && !b->matchOriginAsFallback) changes.append(QStringLiteral("%1 now also injects into about:/data:/blob: frames").arg(name));
+            if (cs.world == QStringLiteral("MAIN") && b->world != QStringLiteral("MAIN")) mainWorld.append(name);
+            const QStringList moreGlobs = newItems(b->includeGlobs, cs.includeGlobs);
+            if (!moreGlobs.isEmpty()) changes.append(QStringLiteral("%1 matches more globs: %2").arg(name, joinLimited(moreGlobs, 3)));
         }
-        const QStringList newCsFiles = newItems(before.contentScriptFiles, after.contentScriptFiles);
-        if (!newCsFiles.isEmpty() && !baseline) {
-            changes.append(QStringLiteral("new content script files: %1").arg(joinLimited(newCsFiles)));
+        if (!mainWorld.isEmpty()) {
+            out.append(make("content_scripts.main_world", QStringLiteral("%1 %2 with world MAIN.").arg(joinLimited(mainWorld, 3), baseline ? QStringLiteral("runs") : QStringLiteral("now runs"))));
         }
         if (!changes.isEmpty()) {
             out.append(make("content_scripts.broadened", changes.join(QStringLiteral("; ")) + u'.'));
+        }
+        const QList<Sink> reg = newSinksOfKinds({QStringLiteral("register_content_scripts")});
+        if (!reg.isEmpty()) {
+            out.append(make("scripting.register", reg.first().evidence, reg.first().file, reg.first().line));
         }
     }
 
@@ -375,6 +439,14 @@ QList<Finding> compareSignatures(const Signature& before, const Signature& after
                             QStringLiteral("Pages matching %1 can now message the extension.").arg(joinLimited(added)),
                             QString(), 0, anyBroad ? Severity::High : Severity::Medium));
         }
+        const QStringList ids = newItems(bm.externallyConnectableIds, am.externallyConnectableIds);
+        if (!ids.isEmpty()) {
+            const bool any = ids.contains(QStringLiteral("*"));
+            out.append(make("externally_connectable.widened",
+                            any ? QStringLiteral("Any other extension can now message it (ids: *).")
+                                : QStringLiteral("Extensions %1 can now message it.").arg(joinLimited(ids)),
+                            QString(), 0, any ? Severity::High : Severity::Medium));
+        }
     }
 
     // --- identity
@@ -385,24 +457,15 @@ QList<Finding> compareSignatures(const Signature& before, const Signature& after
         out.append(make("key.changed", QStringLiteral("manifest.json carries a different public key.")));
     }
     if (!baseline && bm.updateUrl != am.updateUrl) {
-        const QString host = QUrl(am.updateUrl).host();
-        const bool store = host.endsWith(QStringLiteral("google.com")) ||
-                           host.endsWith(QStringLiteral("microsoft.com")) || am.updateUrl.isEmpty();
+        const QString host = QUrl(am.updateUrl).host().toLower();
+        const bool store = hostIs(host, QStringLiteral("google.com")) ||
+                           hostIs(host, QStringLiteral("microsoft.com")) || am.updateUrl.isEmpty();
         out.append(make("update_url.changed",
                         QStringLiteral("update_url changed from \"%1\" to \"%2\".").arg(bm.updateUrl, am.updateUrl),
                         QString(), 0, store ? Severity::Medium : Severity::High));
     }
 
     // --- code execution sinks
-    auto newSinksOfKinds = [&](const QStringList& kinds) {
-        QList<Sink> found;
-        for (const QString& k : kinds) {
-            if (!before.hasSink(k)) {
-                found += after.sinksOfKind(k);
-            }
-        }
-        return found;
-    };
     auto firstRef = [](const QList<Sink>& sinks, QString& file, int& line) {
         if (!sinks.isEmpty()) {
             file = sinks.first().file;
@@ -485,19 +548,49 @@ QList<Finding> compareSignatures(const Signature& before, const Signature& after
 
     // --- headers
     {
-        QStringList beforeHeaders;
+        QSet<QString> beforeOps;
         for (const DnrHeaderMod& h : before.headerMods) {
-            beforeHeaders.append(h.header);
+            beforeOps.insert(h.header + u'|' + h.operation);
         }
-        QStringList newHeaders;
+        QStringList removed;
+        QStringList rewritten;
         for (const DnrHeaderMod& h : after.headerMods) {
-            const QString desc = QStringLiteral("%1 (%2)").arg(h.header, h.operation.isEmpty() ? QStringLiteral("modify") : h.operation);
-            if (!beforeHeaders.contains(h.header) && !newHeaders.contains(desc)) {
-                newHeaders.append(desc);
+            const QString key = h.header + u'|' + h.operation;
+            if (beforeOps.contains(key)) {
+                continue;
+            }
+            beforeOps.insert(key);
+            if (h.operation == QStringLiteral("remove")) {
+                removed.append(h.header);
+            } else {
+                rewritten.append(QStringLiteral("%1 (%2)").arg(h.header, h.operation.isEmpty() ? QStringLiteral("modify") : h.operation));
             }
         }
-        if (!newHeaders.isEmpty()) {
-            out.append(make("headers.strip_security", QStringLiteral("Static rules touch %1.").arg(joinLimited(newHeaders))));
+        if (!removed.isEmpty()) {
+            out.append(make("headers.strip_security", QStringLiteral("Static rules remove %1.").arg(joinLimited(removed))));
+        }
+        if (!rewritten.isEmpty()) {
+            out.append(make("headers.modify", QStringLiteral("Static rules touch %1.").arg(joinLimited(rewritten))));
+        }
+        QStringList beforeTargets;
+        for (const DnrRedirect& r : before.redirects) beforeTargets.append(r.target);
+        QStringList newTargets;
+        for (const DnrRedirect& r : after.redirects) {
+            if (!beforeTargets.contains(r.target) && !newTargets.contains(r.target)) {
+                newTargets.append(r.target);
+            }
+        }
+        if (!newTargets.isEmpty()) {
+            bool thirdParty = false;
+            for (const QString& t : newTargets) {
+                const QString host = hostOfUrl(t);
+                thirdParty = thirdParty || (!host.isEmpty() && !isFirstPartyHost(host, am));
+            }
+            out.append(make("dnr.redirect", QStringLiteral("Redirect targets: %1.").arg(joinLimited(newTargets, 4)),
+                            QString(), 0, thirdParty ? Severity::High : Severity::Medium));
+        }
+        if (after.allowAllRequestsRules > before.allowAllRequestsRules) {
+            out.append(make("dnr.allow_all_requests", QStringLiteral("%1 allowAllRequests rule(s).").arg(after.allowAllRequestsRules)));
         }
         // dynamic: rule updates / header listeners next to security header names in the same file
         QSet<QString> beforeDynamic;
@@ -563,7 +656,7 @@ QList<Finding> compareSignatures(const Signature& before, const Signature& after
         const QStringList beforeHosts = before.domainHosts();
         QSet<QString> pollerFiles;
         for (const TimerRef& t : after.timers) {
-            if (t.kind == QStringLiteral("setInterval") && t.ms >= 30000) {
+            if ((t.kind == QStringLiteral("setInterval") || t.kind == QStringLiteral("alarm")) && t.ms >= 30000) {
                 pollerFiles.insert(t.file);
             }
         }
@@ -584,14 +677,15 @@ QList<Finding> compareSignatures(const Signature& before, const Signature& after
                     if (network) {
                         poller = true;
                         for (const TimerRef& t : after.timers) {
-                            if (t.file == r.file && t.kind == QStringLiteral("setInterval") && t.ms > period) {
+                            if (t.file == r.file && (t.kind == QStringLiteral("setInterval") || t.kind == QStringLiteral("alarm")) && t.ms > period) {
                                 period = t.ms;
                             }
                         }
                     }
                 }
             }
-            if (poller && !isAllowlistedHost(d.host, am)) {
+            // Public hosting is not a trusted tenant: only the extension's own site softens a poller.
+            if (poller && !isFirstPartyHost(d.host, am)) {
                 const CodeRef& r = d.refs.first();
                 out.append(make("network.poller", QStringLiteral("Contacts %1 %2 (%3:%4).").arg(d.host, humanPeriod(period), r.file).arg(r.line), r.file, r.line));
                 continue;
@@ -692,8 +786,26 @@ QList<Finding> compareSignatures(const Signature& before, const Signature& after
         }
     }
 
+    // --- WebAssembly and invisible characters
+    {
+        const QStringList wasm = newItems(before.wasmFiles, after.wasmFiles);
+        if (!wasm.isEmpty()) {
+            out.append(make("wasm.added", QStringLiteral("New modules: %1.").arg(joinLimited(wasm))));
+        }
+        const QList<Sink> inst = newSinksOfKinds({QStringLiteral("wasm_instantiate")});
+        if (!inst.isEmpty()) {
+            out.append(make("wasm.instantiate", inst.first().evidence, inst.first().file, inst.first().line));
+        }
+        if (after.obfuscation.invisibleChars > 0 && before.obfuscation.invisibleChars == 0) {
+            out.append(make("unicode.invisible", QStringLiteral("%1 invisible or bidirectional control character(s) in the code.").arg(after.obfuscation.invisibleChars)));
+        }
+        if (!after.analysisWarnings.isEmpty()) {
+            out.append(make("analysis.incomplete", joinLimited(after.analysisWarnings, 4)));
+        }
+    }
+
     // --- DNR rules, WAR, size, files, manifest odds and ends
-    if (after.dnrRuleCount > before.dnrRuleCount && after.headerMods.isEmpty()) {
+    if (after.dnrRuleCount > before.dnrRuleCount && after.headerMods.isEmpty() && after.redirects.isEmpty()) {
         out.append(make("dnr.rules_added", QStringLiteral("%1 static rules (was %2).").arg(after.dnrRuleCount).arg(before.dnrRuleCount)));
     }
     if (!baseline && bm.webAccessibleResources != am.webAccessibleResources) {

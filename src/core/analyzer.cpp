@@ -12,14 +12,21 @@
 
 namespace extwatch {
 
-QList<SourceFile> loadSourcesFromArchive(Database& db, const BlobStore& blobs, qint64 versionId) {
+QList<SourceFile> loadSourcesFromArchive(Database& db, const BlobStore& blobs, qint64 versionId,
+                                         bool contentForAll) {
     QList<SourceFile> out;
     for (const FileEntry& f : db.filesForVersion(versionId)) {
-        QFile blob(blobs.pathFor(f.sha256));
-        if (!blob.open(QIODevice::ReadOnly)) {
-            continue;
+        SourceFile file;
+        file.path = f.relPath;
+        file.size = f.size;
+        if (contentForAll || isAnalyzablePath(f.relPath)) {
+            QFile blob(blobs.pathFor(f.sha256));
+            if (!blob.open(QIODevice::ReadOnly)) {
+                continue;
+            }
+            file.content = blob.readAll();
         }
-        out.append({f.relPath, blob.readAll()});
+        out.append(file);
     }
     return out;
 }
@@ -35,7 +42,7 @@ std::optional<Signature> signatureForVersion(Database& db, const BlobStore& blob
             return Signature::fromJson(json);
         }
     }
-    const QList<SourceFile> files = loadSourcesFromArchive(db, blobs, versionId);
+    const QList<SourceFile> files = loadSourcesFromArchive(db, blobs, versionId, false);
     ManifestFacts manifest;
     for (const SourceFile& f : files) {
         if (f.path == QStringLiteral("manifest.json")) {

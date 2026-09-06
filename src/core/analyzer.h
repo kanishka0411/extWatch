@@ -13,8 +13,10 @@
 
 namespace extwatch {
 
-// Sources of one archived version, restored from the blob store.
-QList<SourceFile> loadSourcesFromArchive(Database& db, const BlobStore& blobs, qint64 versionId);
+// Sources of one archived version, restored from the blob store. With contentForAll false only
+// analyzable files are read; the rest carry name and size.
+QList<SourceFile> loadSourcesFromArchive(Database& db, const BlobStore& blobs, qint64 versionId,
+                                         bool contentForAll = true);
 
 // Returns the stored signature for a version, computing and storing it on first use.
 std::optional<Signature> signatureForVersion(Database& db, const BlobStore& blobs, qint64 versionId);

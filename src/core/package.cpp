@@ -31,8 +31,15 @@ qint64 crxZipOffset(const QByteArray& data) {
 
 namespace {
 
-QList<SourceFile> readZip(const QByteArray& data, QString* error) {
+constexpr qint64 kMaxArchiveBytes = 512LL * 1024 * 1024;
+constexpr mz_uint kMaxEntries = 20000;
+constexpr qint64 kMaxEntryBytes = 128LL * 1024 * 1024;
+constexpr qint64 kMaxTotalBytes = 1024LL * 1024 * 1024;
+constexpr qint64 kMaxRatio = 200;
+
+QList<SourceFile> readZip(const QByteArray& data, QString* error, QStringList* warnings) {
     QList<SourceFile> out;
+    qint64 total = 0;
     mz_zip_archive zip;
     std::memset(&zip, 0, sizeof(zip));
     if (!mz_zip_reader_init_mem(&zip, data.constData(), static_cast<size_t>(data.size()), 0)) {
@@ -42,7 +49,10 @@ QList<SourceFile> readZip(const QByteArray& data, QString* error) {
         return out;
     }
     const mz_uint count = mz_zip_reader_get_num_files(&zip);
-    for (mz_uint i = 0; i < count; ++i) {
+    if (count > kMaxEntries) {
+        if (warnings) warnings->append(QStringLiteral("archive has %1 entries; only the first %2 are read").arg(count).arg(kMaxEntries));
+    }
+    for (mz_uint i = 0; i < count && i < kMaxEntries; ++i) {
         if (mz_zip_reader_is_file_a_directory(&zip, i)) {
             continue;
         }
@@ -50,21 +60,49 @@ QList<SourceFile> readZip(const QByteArray& data, QString* error) {
         if (!mz_zip_reader_file_stat(&zip, i, &st)) {
             continue;
         }
-        size_t size = 0;
-        void* buf = mz_zip_reader_extract_to_heap(&zip, i, &size, 0);
-        if (!buf) {
-            continue;
-        }
         QString name = QString::fromUtf8(st.m_filename).replace(u'\\', u'/');
         while (name.startsWith(u'/')) {
             name.remove(0, 1);
         }
         if (name.isEmpty() || name.contains(QStringLiteral("../"))) {
-            mz_free(buf);
             continue;
         }
-        out.append({name, QByteArray(static_cast<const char*>(buf), static_cast<qsizetype>(size))});
+        const qint64 uncompressed = static_cast<qint64>(st.m_uncomp_size);
+        const qint64 compressed = static_cast<qint64>(st.m_comp_size);
+        SourceFile file;
+        file.path = name;
+        file.size = uncompressed;
+        if (uncompressed > kMaxEntryBytes) {
+            if (warnings) warnings->append(QStringLiteral("%1 is %2 MiB; not inflated").arg(name).arg(uncompressed / (1024 * 1024)));
+            out.append(file);
+            continue;
+        }
+        if (uncompressed > kMaxRatio * qMax<qint64>(compressed, 1024)) {
+            if (warnings) warnings->append(QStringLiteral("%1 inflates %2x; not inflated").arg(name).arg(uncompressed / qMax<qint64>(compressed, 1)));
+            out.append(file);
+            continue;
+        }
+        if (!isAnalyzablePath(name)) {
+            out.append(file);  // size and name are enough for non-code files
+            continue;
+        }
+        if (total + uncompressed > kMaxTotalBytes) {
+            if (warnings) warnings->append(QStringLiteral("archive inflates beyond %1 MiB; remaining entries not read").arg(kMaxTotalBytes / (1024 * 1024)));
+            out.append(file);
+            continue;
+        }
+        size_t size = 0;
+        void* buf = mz_zip_reader_extract_to_heap(&zip, i, &size, 0);
+        if (!buf) {
+            if (warnings) warnings->append(QStringLiteral("%1 could not be inflated").arg(name));
+            out.append(file);
+            continue;
+        }
+        total += static_cast<qint64>(size);
+        file.content = QByteArray(static_cast<const char*>(buf), static_cast<qsizetype>(size));
+        file.size = file.content.size();
         mz_free(buf);
+        out.append(file);
     }
     mz_zip_reader_end(&zip);
 
@@ -96,10 +134,16 @@ QList<SourceFile> readZip(const QByteArray& data, QString* error) {
 
 }  // namespace
 
-QList<SourceFile> loadSourcesFromPackage(const QString& path, QString* error) {
+QList<SourceFile> loadSourcesFromPackage(const QString& path, QString* error, QStringList* warnings) {
     const QFileInfo info(path);
     if (info.isDir()) {
-        return loadSourcesFromDir(info.absoluteFilePath());
+        return loadSourcesFromDir(info.absoluteFilePath(), false);
+    }
+    if (info.size() > kMaxArchiveBytes) {
+        if (error) {
+            *error = QStringLiteral("%1 is larger than %2 MiB").arg(path).arg(kMaxArchiveBytes / (1024 * 1024));
+        }
+        return {};
     }
     QFile f(path);
     if (!f.open(QIODevice::ReadOnly)) {
@@ -113,7 +157,7 @@ QList<SourceFile> loadSourcesFromPackage(const QString& path, QString* error) {
     if (crx >= 0) {
         data = data.mid(crx);
     }
-    return readZip(data, error);
+    return readZip(data, error, warnings);
 }
 
 bool writeZip(const QString& zipPath, const QList<SourceFile>& files, QString* error) {
