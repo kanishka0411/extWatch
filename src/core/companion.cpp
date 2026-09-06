@@ -1,5 +1,6 @@
 #include "core/companion.h"
 
+#include <QCryptographicHash>
 #include <QDir>
 #include <QDirIterator>
 #include <QFile>
@@ -154,6 +155,49 @@ QList<HostRegistration> unregisterNativeHost(const QList<BrowserInstall>& browse
         out.append(r);
     }
     return out;
+}
+
+namespace {
+
+QString hashTreeOf(const QString& root, const QStringList& relPaths) {
+    QCryptographicHash hash(QCryptographicHash::Sha256);
+    for (const QString& rel : relPaths) {
+        QFile f(root + u'/' + rel);
+        if (!f.open(QIODevice::ReadOnly)) {
+            return QString();
+        }
+        hash.addData(rel.toUtf8());
+        hash.addData(QByteArrayView("\0", 1));
+        hash.addData(f.readAll());
+    }
+    return QString::fromLatin1(hash.result().toHex());
+}
+
+QStringList companionFiles() {
+    QStringList out;
+    QDirIterator it(QStringLiteral(":/companion"), QDirIterator::Subdirectories);
+    while (it.hasNext()) {
+        const QString resource = it.next();
+        if (!QFileInfo(resource).isDir()) {
+            out.append(resource.mid(QStringLiteral(":/companion/").size()));
+        }
+    }
+    out.sort();
+    return out;
+}
+
+}  // namespace
+
+QString companionEmbeddedHash() {
+    return hashTreeOf(QStringLiteral(":/companion"), companionFiles());
+}
+
+QString companionExtractedHash(const QString& dataDir) {
+    return hashTreeOf(dataDir + QStringLiteral("/companion"), companionFiles());
+}
+
+bool companionExtracted(const QString& dataDir) {
+    return QFileInfo::exists(dataDir + QStringLiteral("/companion/manifest.json"));
 }
 
 QString extractCompanion(const QString& dataDir, QString* error) {

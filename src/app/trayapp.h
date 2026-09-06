@@ -6,6 +6,7 @@
 #include <QString>
 #include <QTimer>
 
+#include "core/companionserver.h"
 #include "core/scanner.h"
 #include "core/storetracker.h"
 #include "core/watcher.h"
@@ -16,7 +17,6 @@ class QSystemTrayIcon;
 
 namespace extwatch {
 
-class CompanionServer;
 class MainWindow;
 
 // Owns the tray icon, the file-system watcher and the periodic rescan; runs scans on a worker
@@ -37,7 +37,7 @@ public slots:
     void openEvent(qint64 eventId);
     void openSettings();
     void openCompanionSetup();
-    void toggleExtension(const QString& extId, bool enable);
+    void toggleExtension(const extwatch::CompanionServer::Target& target, bool enable);
 
 signals:
     void scanFinished(const extwatch::ScanResult& result);

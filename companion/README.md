@@ -18,6 +18,5 @@ host manifest whitelists. The matching private key is not in the repository.
 ## Protocol
 
 Native messaging (4-byte little-endian length + JSON). Messages from the app:
-`{type: "ping"}`, `{type: "list", id}`, `{type: "setEnabled", id, extensionId, enabled}`,
-`{type: "uninstall", id, extensionId}`. Messages to the app: `hello`, `pong`, `list`, `result`,
+`{type: "ping"}`, `{type: "list", id}`, `{type: "setEnabled", id, extensionId, enabled}`. Messages to the app: `hello`, `pong`, `list`, `result`,
 `event` (`installed`, `uninstalled`, `enabled`, `disabled`).

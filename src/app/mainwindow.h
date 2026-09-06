@@ -5,6 +5,7 @@
 #include <QString>
 #include <optional>
 
+#include "core/companionserver.h"
 #include "core/database.h"
 #include "core/scanner.h"
 
@@ -38,7 +39,7 @@ signals:
     void rescanRequested();
     void settingsChanged();
     void eventAcknowledged();
-    void toggleEnabledRequested(const QString& extId, bool enable);
+    void toggleEnabledRequested(const extwatch::CompanionServer::Target& target, bool enable);
     void companionSetupRequested();
 
 private:

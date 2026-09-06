@@ -5,6 +5,7 @@
 #include <QUrl>
 
 #include "core/browserkind.h"
+#include "core/database.h"
 
 namespace extwatch {
 
@@ -12,23 +13,39 @@ struct ActionResult {
     bool ok = false;
     QString message;
     QString path;
+    QString quarantineId;
 };
 
 QString quarantineRoot(const QString& dataDir);
 
-// Moves an installed version directory into <dataDir>/quarantine/<extId>/<dirName>. The browser
-// then reports the extension as corrupted and disables it. Reversible with restoreQuarantined.
-ActionResult quarantineVersionDir(const QString& dataDir, const QString& extId,
-                                  const QString& versionDirPath);
+enum class MoveOutcome { Moved, CopiedSourceRemains, Failed };
 
-// Moves a quarantined directory back under <extensionsDir>/<extId>/.
-ActionResult restoreQuarantined(const QString& dataDir, const QString& extId, const QString& dirName,
-                                const QString& extensionsDir);
+// Moves a directory. Same volume: one rename. Across volumes: copy to a temporary sibling,
+// verify the copy against expectedTreeHashHex (or against the source when empty), rename it into
+// place, then remove the source. If the source cannot be removed the copy is kept and the caller
+// is told, so nothing is ever silently duplicated or lost.
+MoveOutcome moveDirectoryVerified(const QString& src, const QString& dst, const QString& expectedTreeHashHex,
+                                  QString* error = nullptr);
 
-QStringList quarantinedDirs(const QString& dataDir, const QString& extId);
+struct QuarantineRequest {
+    qint64 extensionId = 0;  // extensions.id, which pins browser and profile
+    QString extId;
+    QString browserKind;
+    QString userDataDir;
+    QString profileDir;
+    QString version;
+    QString dirName;
+    QString treeHash;
+    QString versionDirPath;
+};
 
-// Moves a directory, falling back to copy-and-delete across volumes.
-bool moveDirectory(const QString& src, const QString& dst, QString* error = nullptr);
+// Moves the installed version directory of exactly this browser profile into
+// <dataDir>/quarantine/<random id>/ and records where it came from. The browser then reports the
+// extension as corrupted and disables it. Reversible with restoreQuarantine.
+ActionResult quarantineVersion(Database& db, const QString& dataDir, const QuarantineRequest& request);
+
+// Moves a quarantined directory back to the exact path it was taken from.
+ActionResult restoreQuarantine(Database& db, const QString& dataDir, const QString& quarantineId);
 
 QUrl webStoreUrl(BrowserKind kind, const QString& extId);
 QString extensionsPageUrl(BrowserKind kind, const QString& extId);

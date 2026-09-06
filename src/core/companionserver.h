@@ -30,9 +30,18 @@ public:
     // Browsers whose companion reports this extension as installed.
     QStringList browsersWith(const QString& extId) const;
 
+    // Exactly one browser profile: the browser kind of the profile plus the extension IDs installed
+    // in it, which identify the companion instance among several of the same browser.
+    struct Target {
+        QString browserKindId;           // "chrome", "brave", ...
+        QString extId;                   // the extension to act on
+        QStringList profileExtensionIds; // everything installed in that profile
+    };
+    QString describeTarget(const Target& target) const;
+
     using ResultHandler = std::function<void(const QStringList& succeeded, const QStringList& failed)>;
-    // Asks every connected companion to enable or disable the extension.
-    void setEnabled(const QString& extId, bool enabled, ResultHandler done, int timeoutMs = 6000);
+    // Enables or disables the extension in the one companion instance that matches the target.
+    void setEnabled(const Target& target, bool enabled, ResultHandler done, int timeoutMs = 6000);
 
 signals:
     void connectionsChanged();
@@ -61,6 +70,7 @@ private:
     void onReadyRead(Connection* c);
     void onDisconnected(Connection* c);
     void handle(Connection* c, const QJsonObject& message);
+    Connection* bestMatch(const Target& target, int* candidates) const;
     void send(Connection* c, const QJsonObject& message);
     void finish(int requestId);
 

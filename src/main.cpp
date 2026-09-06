@@ -1,5 +1,7 @@
 #include <QApplication>
 #include <QCoreApplication>
+#include <QDir>
+#include <QLockFile>
 #include <QStringList>
 
 #include "app/trayapp.h"
@@ -58,6 +60,13 @@ int main(int argc, char* argv[]) {
         } else if (args.at(i) == QStringLiteral("--screenshot")) {
             screenshot = args.at(i + 1);  // debugging aid: grab the window after the first scan
         }
+    }
+    // One tray instance per archive: a second one would take over the companion socket.
+    QDir().mkpath(dataDir);
+    QLockFile lock(dataDir + QStringLiteral("/instance.lock"));
+    if (!lock.tryLock(200)) {
+        qWarning("ExtWatch is already running for %s", qPrintable(dataDir));
+        return 0;
     }
     extwatch::TrayApp tray(dataDir);
     tray.setScreenshotPath(screenshot);

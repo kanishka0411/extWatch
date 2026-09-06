@@ -12,7 +12,7 @@
 #include <QUrl>
 #include <QVBoxLayout>
 
-#include "app/companionserver.h"
+#include "core/companionserver.h"
 #include "core/companion.h"
 #include "core/discovery.h"
 
@@ -96,13 +96,19 @@ void CompanionDialog::registerAndOpen() {
 
 void CompanionDialog::refreshStatus() {
     const int n = m_server->connectionCount();
+    QString text;
     if (n == 0) {
-        m_status->setText(QStringLiteral("<span style='color:gray'>No companion connected yet.</span>"));
+        text = QStringLiteral("<span style='color:gray'>No companion connected yet.</span>");
     } else {
-        m_status->setText(QStringLiteral("<b style='color:#2ea043'>Connected:</b> %1 browser profile(s) (%2)")
-                              .arg(n)
-                              .arg(m_server->connectedBrowsers().join(QStringLiteral(", "))));
+        text = QStringLiteral("<b style='color:#2ea043'>Connected:</b> %1 browser profile(s) (%2)")
+                   .arg(n)
+                   .arg(m_server->connectedBrowsers().join(QStringLiteral(", ")));
     }
+    if (companionExtracted(m_dataDir) && companionExtractedHash(m_dataDir) != companionEmbeddedHash()) {
+        text += QStringLiteral("<br><b style='color:#e54848'>The extracted companion files differ from the ones built into ExtWatch.</b> "
+                               "Click \"Register and open folder\" to reinstall them, then reload the extension.");
+    }
+    m_status->setText(text);
 }
 
 }  // namespace extwatch

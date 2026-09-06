@@ -11,7 +11,6 @@
 
 #include "app/appsettings.h"
 #include "app/companiondialog.h"
-#include "app/companionserver.h"
 #include "app/mainwindow.h"
 #include "app/settingsdialog.h"
 #include "core/database.h"
@@ -351,9 +350,9 @@ void TrayApp::openCompanionSetup() {
     dialog.exec();
 }
 
-void TrayApp::toggleExtension(const QString& extId, bool enable) {
+void TrayApp::toggleExtension(const CompanionServer::Target& target, bool enable) {
     QPointer<MainWindow> window = m_window;
-    m_companion->setEnabled(extId, enable, [this, window, extId, enable](const QStringList& ok, const QStringList& failed) {
+    m_companion->setEnabled(target, enable, [this, window, enable](const QStringList& ok, const QStringList& failed) {
         QString text;
         if (!ok.isEmpty()) {
             text += QStringLiteral("%1 in %2.\n").arg(enable ? QStringLiteral("Enabled") : QStringLiteral("Disabled"), ok.join(QStringLiteral(", ")));

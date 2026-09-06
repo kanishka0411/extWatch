@@ -1,8 +1,9 @@
-#include "app/companionserver.h"
+#include "core/companionserver.h"
 
 #include <QJsonArray>
 #include <QJsonDocument>
 #include <QLocalSocket>
+#include <QSet>
 #include <QTimer>
 
 #include "core/companion.h"
@@ -92,9 +93,18 @@ void CompanionServer::onReadyRead(Connection* c) {
         const QByteArray line = c->buffer.left(nl);
         c->buffer.remove(0, nl + 1);
         const QJsonObject envelope = QJsonDocument::fromJson(line).object();
-        if (envelope.value(QStringLiteral("channel")).toString() == QStringLiteral("companion")) {
-            handle(c, envelope.value(QStringLiteral("message")).toObject());
+        if (envelope.value(QStringLiteral("channel")).toString() != QStringLiteral("companion")) {
+            continue;
         }
+        // Only the bundled companion may drive this server. The host relays the calling
+        // extension's origin, which the browser guarantees.
+        const QString expectedOrigin = QStringLiteral("chrome-extension://%1/").arg(companionExtensionId());
+        const QString origin = envelope.value(QStringLiteral("origin")).toString();
+        if (!companionExtensionId().isEmpty() && origin != expectedOrigin) {
+            c->socket->abort();
+            return;
+        }
+        handle(c, envelope.value(QStringLiteral("message")).toObject());
     }
 }
 
@@ -102,6 +112,7 @@ void CompanionServer::send(Connection* c, const QJsonObject& message) {
     QJsonObject envelope;
     envelope.insert(QStringLiteral("message"), message);
     c->socket->write(QJsonDocument(envelope).toJson(QJsonDocument::Compact) + '\n');
+    c->socket->flush();
 }
 
 void CompanionServer::handle(Connection* c, const QJsonObject& m) {
@@ -153,20 +164,80 @@ void CompanionServer::handle(Connection* c, const QJsonObject& m) {
     }
 }
 
-void CompanionServer::setEnabled(const QString& extId, bool enabled, ResultHandler done, int timeoutMs) {
-    const int id = m_nextRequestId++;
-    Pending p;
-    p.extId = extId;
-    p.done = std::move(done);
-    for (Connection* c : m_connections) {
-        p.waiting.insert(c->socket);
+namespace {
+
+// Companion browser hints that can belong to a browser kind id.
+bool hintMatchesKind(const QString& hint, const QString& kindId) {
+    if (hint.isEmpty() || hint == QStringLiteral("chromium-based")) {
+        return true;  // unknown flavour: cannot exclude
     }
-    if (p.waiting.isEmpty()) {
-        if (p.done) {
-            p.done({}, {QStringLiteral("no companion connected")});
+    if (kindId.startsWith(QStringLiteral("brave"))) return hint == QStringLiteral("brave");
+    if (kindId.startsWith(QStringLiteral("edge"))) return hint == QStringLiteral("edge");
+    if (kindId == QStringLiteral("vivaldi")) return hint == QStringLiteral("vivaldi");
+    if (kindId == QStringLiteral("opera")) return hint == QStringLiteral("opera");
+    if (kindId == QStringLiteral("chromium")) return hint == QStringLiteral("chromium") || hint == QStringLiteral("chrome");
+    // chrome, chrome-beta, arc, ...: anything that reports itself as Chrome/Chromium
+    return hint == QStringLiteral("chrome") || hint == QStringLiteral("chromium");
+}
+
+double overlap(const QStringList& a, const QStringList& b) {
+    if (a.isEmpty() && b.isEmpty()) return 1.0;
+    const QSet<QString> sa(a.begin(), a.end());
+    const QSet<QString> sb(b.begin(), b.end());
+    const int inter = static_cast<int>((sa & sb).size());
+    const int uni = static_cast<int>((sa | sb).size());
+    return uni == 0 ? 0.0 : static_cast<double>(inter) / uni;
+}
+
+}  // namespace
+
+CompanionServer::Connection* CompanionServer::bestMatch(const Target& target, int* candidates) const {
+    Connection* best = nullptr;
+    double bestScore = -1;
+    int count = 0;
+    for (Connection* c : m_connections) {
+        if (!hintMatchesKind(c->browser, target.browserKindId) || !c->extensionIds.contains(target.extId)) {
+            continue;
+        }
+        ++count;
+        const double score = overlap(c->extensionIds, target.profileExtensionIds);
+        if (score > bestScore) {
+            bestScore = score;
+            best = c;
+        }
+    }
+    if (candidates) {
+        *candidates = count;
+    }
+    return best;
+}
+
+QString CompanionServer::describeTarget(const Target& target) const {
+    int candidates = 0;
+    const Connection* c = bestMatch(target, &candidates);
+    if (!c) {
+        return QStringLiteral("no companion connected in %1 with this extension").arg(target.browserKindId);
+    }
+    return QStringLiteral("%1 companion (%2 extensions%3)")
+        .arg(c->browser.isEmpty() ? target.browserKindId : c->browser)
+        .arg(c->extensionIds.size())
+        .arg(candidates > 1 ? QStringLiteral(", best of %1 matching profiles").arg(candidates) : QString());
+}
+
+void CompanionServer::setEnabled(const Target& target, bool enabled, ResultHandler done, int timeoutMs) {
+    int candidates = 0;
+    Connection* c = bestMatch(target, &candidates);
+    if (!c) {
+        if (done) {
+            done({}, {QStringLiteral("no companion connected in %1 with %2 installed").arg(target.browserKindId, target.extId)});
         }
         return;
     }
+    const int id = m_nextRequestId++;
+    Pending p;
+    p.extId = target.extId;
+    p.done = std::move(done);
+    p.waiting.insert(c->socket);
     p.timer = new QTimer(this);
     p.timer->setSingleShot(true);
     connect(p.timer, &QTimer::timeout, this, [this, id]() { finish(id); });
@@ -175,11 +246,9 @@ void CompanionServer::setEnabled(const QString& extId, bool enabled, ResultHandl
     QJsonObject request;
     request.insert(QStringLiteral("type"), QStringLiteral("setEnabled"));
     request.insert(QStringLiteral("id"), id);
-    request.insert(QStringLiteral("extensionId"), extId);
+    request.insert(QStringLiteral("extensionId"), target.extId);
     request.insert(QStringLiteral("enabled"), enabled);
-    for (Connection* c : m_connections) {
-        send(c, request);
-    }
+    send(c, request);
 }
 
 void CompanionServer::finish(int requestId) {

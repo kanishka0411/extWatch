@@ -144,9 +144,16 @@ void ExtensionDetailView::buildUi() {
     connect(m_setupBtn, &QPushButton::clicked, this, &ExtensionDetailView::companionSetupRequested);
     m_toggleBtn = new QPushButton(QStringLiteral("Disable"), this);
     connect(m_toggleBtn, &QPushButton::clicked, this, [this]() {
-        if (m_ext) {
-            emit toggleEnabledRequested(m_ext->extId, !m_ext->enabled);
+        if (!m_ext) {
+            return;
         }
+        CompanionServer::Target target;
+        target.extId = m_ext->extId;
+        target.browserKindId = m_browser ? m_browser->kind : QStringLiteral("chrome");
+        for (const ExtensionRow& row : m_db.extensionsForProfile(m_ext->profileId)) {
+            target.profileExtensionIds.append(row.extId);
+        }
+        emit toggleEnabledRequested(target, !m_ext->enabled);
     });
     actions->addWidget(m_setupBtn);
     actions->addWidget(m_toggleBtn);
@@ -425,7 +432,11 @@ void ExtensionDetailView::loadHeader() {
     const bool hasFiles = current && QFileInfo(versionDirPath(*current)).isDir();
     m_folderBtn->setEnabled(hasFiles);
     m_quarantineBtn->setEnabled(hasFiles);
-    m_restoreBtn->setVisible(!quarantinedDirs(m_dataDir, m_ext->extId).isEmpty());
+    bool restorable = false;
+    for (const QuarantineRow& q : m_db.quarantinesForExtension(m_ext->id)) {
+        restorable = restorable || q.state != QStringLiteral("restored");
+    }
+    m_restoreBtn->setVisible(restorable);
 }
 
 void ExtensionDetailView::loadEvents() {
@@ -761,21 +772,31 @@ void ExtensionDetailView::exportReport() {
 
 void ExtensionDetailView::quarantine() {
     const std::optional<VersionRow> current = currentVersion();
-    if (!m_ext || !current) {
+    if (!m_ext || !m_browser || !m_profile || !current) {
         return;
     }
     const QString dir = versionDirPath(*current);
     const auto answer = QMessageBox::question(
         this, QStringLiteral("Quarantine %1?").arg(m_ext->name),
-        QStringLiteral("ExtWatch will move\n\n%1\n\ninto its archive. The browser will report the extension as corrupted "
+        QStringLiteral("ExtWatch will move\n\n%1\n\ninto its quarantine folder. %2 will report the extension as corrupted "
                        "and disable it; do not choose \"Repair\" there, that re-downloads the same version.\n\n"
-                       "You can restore the files from this screen at any time. Continue?")
-            .arg(dir),
+                       "Only this browser profile is affected. You can restore the files from this screen. Continue?")
+            .arg(dir, m_browser->displayName),
         QMessageBox::Yes | QMessageBox::No, QMessageBox::No);
     if (answer != QMessageBox::Yes) {
         return;
     }
-    const ActionResult r = quarantineVersionDir(m_dataDir, m_ext->extId, dir);
+    QuarantineRequest req;
+    req.extensionId = m_ext->id;
+    req.extId = m_ext->extId;
+    req.browserKind = m_browser->kind;
+    req.userDataDir = m_browser->userDataDir;
+    req.profileDir = m_profile->dirName;
+    req.version = current->version;
+    req.dirName = current->dirName;
+    req.treeHash = current->treeHash;
+    req.versionDirPath = dir;
+    const ActionResult r = quarantineVersion(m_db, m_dataDir, req);
     if (!r.ok) {
         QMessageBox::warning(this, QStringLiteral("Quarantine failed"), r.message);
         return;
@@ -789,14 +810,22 @@ void ExtensionDetailView::restoreFromQuarantine() {
     if (!m_ext) {
         return;
     }
-    for (const QString& dirName : quarantinedDirs(m_dataDir, m_ext->extId)) {
-        const ActionResult r = restoreQuarantined(m_dataDir, m_ext->extId, dirName, extensionsDir());
-        if (!r.ok) {
-            QMessageBox::warning(this, QStringLiteral("Restore failed"), r.message);
-            return;
+    QStringList messages;
+    bool anyFailure = false;
+    for (const QuarantineRow& q : m_db.quarantinesForExtension(m_ext->id)) {
+        if (q.state == QStringLiteral("restored")) {
+            continue;
         }
+        const ActionResult r = restoreQuarantine(m_db, m_dataDir, q.id);
+        messages.append(r.message);
+        anyFailure = anyFailure || !r.ok;
     }
-    QMessageBox::information(this, QStringLiteral("Restored"), QStringLiteral("The files are back in place. Restart the browser to reload the extension."));
+    if (anyFailure) {
+        QMessageBox::warning(this, QStringLiteral("Restore"), messages.join(u'\n'));
+    } else {
+        QMessageBox::information(this, QStringLiteral("Restored"),
+                                 messages.join(u'\n') + QStringLiteral("\n\nRestart the browser to reload the extension."));
+    }
     emit inventoryChanged();
     refresh();
 }

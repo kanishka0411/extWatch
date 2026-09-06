@@ -34,6 +34,7 @@ add_library(extwatch_core STATIC
     core/storetracker.cpp core/storetracker.h
     core/nativemessaging.cpp core/nativemessaging.h
     core/companion.cpp core/companion.h
+    core/companionserver.cpp core/companionserver.h
     core/jsonutil.h
 )
 target_include_directories(extwatch_core
@@ -52,7 +53,6 @@ qt_add_executable(extwatch
     app/jshighlighter.cpp app/jshighlighter.h
     app/settingsdialog.cpp app/settingsdialog.h
     app/appsettings.cpp app/appsettings.h
-    app/companionserver.cpp app/companionserver.h
     app/companiondialog.cpp app/companiondialog.h
     nativehost/nativehost.cpp nativehost/nativehost.h
 )

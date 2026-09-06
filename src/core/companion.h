@@ -33,4 +33,10 @@ QList<HostRegistration> unregisterNativeHost(const QList<BrowserInstall>& browse
 // Copies the embedded companion extension to <dataDir>/companion and returns that path.
 QString extractCompanion(const QString& dataDir, QString* error = nullptr);
 
+// SHA-256 over the embedded companion files, and over the extracted copy; a mismatch means the
+// files on disk were modified after installation.
+QString companionEmbeddedHash();
+QString companionExtractedHash(const QString& dataDir);
+bool companionExtracted(const QString& dataDir);
+
 }  // namespace extwatch

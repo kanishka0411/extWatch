@@ -5,6 +5,7 @@
 
 #include "core/analyzer.h"
 #include "core/blobstore.h"
+#include "core/companionserver.h"
 #include "core/database.h"
 
 class QCheckBox;
@@ -37,7 +38,7 @@ public:
 signals:
     void inventoryChanged();    // quarantine or restore happened
     void eventAcknowledged();
-    void toggleEnabledRequested(const QString& extId, bool enable);
+    void toggleEnabledRequested(const extwatch::CompanionServer::Target& target, bool enable);
     void companionSetupRequested();
 
 private:

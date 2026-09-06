@@ -1,6 +1,6 @@
 // ExtWatch Companion: a thin bridge between the browser's management API and the ExtWatch
 // desktop app. It connects to the native messaging host that ExtWatch registers and answers
-// three requests: list installed extensions, enable/disable one, and forward install events.
+// two requests: list installed extensions and enable/disable one, and it forwards install events.
 // It never reads page content and never talks to the network.
 
 const HOST_NAME = 'app.extwatch.host';
@@ -74,18 +74,6 @@ async function handle(message) {
           reply.ok = true;
           reply.enabled = Boolean(message.enabled);
         }
-      } catch (e) {
-        reply.ok = false;
-        reply.error = String((e && e.message) || e);
-      }
-      send(reply);
-      break;
-    }
-    case 'uninstall': {
-      const reply = { type: 'result', id: message.id, extensionId: message.extensionId, browser: browserHint() };
-      try {
-        await chrome.management.uninstall(message.extensionId, { showConfirmDialog: true });
-        reply.ok = true;
       } catch (e) {
         reply.ok = false;
         reply.error = String((e && e.message) || e);
