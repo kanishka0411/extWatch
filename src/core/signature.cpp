@@ -106,23 +106,31 @@ const QSet<QString>& securityHeaders() {
 
 QString dnrConditionSummary(const QJsonObject& c) {
     QStringList parts;
-    auto add = [&](const char* label, const QJsonValue& v) {
-        if (v.isString() && !v.toString().isEmpty()) {
-            parts.append(QStringLiteral("%1=%2").arg(QLatin1StringView(label), v.toString()));
-        } else if (v.isArray() && !v.toArray().isEmpty()) {
+    for (auto it = c.constBegin(); it != c.constEnd(); ++it) {  // QJsonObject iterates in key order
+        const QJsonValue v = it.value();
+        QString rendered;
+        if (v.isArray()) {
             QStringList items;
-            for (const QJsonValue& x : v.toArray()) items.append(x.toString());
+            for (const QJsonValue& x : v.toArray()) {
+                items.append(x.isString() ? x.toString()
+                                          : QString::fromUtf8(QJsonDocument(x.isObject() ? QJsonDocument(x.toObject()) : QJsonDocument(x.toArray())).toJson(QJsonDocument::Compact)));
+            }
             items.sort();
-            parts.append(QStringLiteral("%1=%2").arg(QLatin1StringView(label), items.join(u',')));
+            rendered = items.join(u',');
+        } else if (v.isString()) {
+            rendered = v.toString();
+        } else if (v.isBool()) {
+            rendered = v.toBool() ? QStringLiteral("true") : QStringLiteral("false");
+        } else if (v.isDouble()) {
+            rendered = QString::number(v.toDouble());
+        } else if (v.isObject()) {
+            rendered = QString::fromUtf8(QJsonDocument(v.toObject()).toJson(QJsonDocument::Compact));
         }
-    };
-    add("urlFilter", c.value(QStringLiteral("urlFilter")));
-    add("regexFilter", c.value(QStringLiteral("regexFilter")));
-    add("types", c.value(QStringLiteral("resourceTypes")));
-    add("domains", c.value(QStringLiteral("requestDomains")));
-    add("initiators", c.value(QStringLiteral("initiatorDomains")));
-    add("excludedDomains", c.value(QStringLiteral("excludedRequestDomains")));
-    if (c.contains(QStringLiteral("tabIds"))) parts.append(QStringLiteral("tabs"));
+        if (rendered.isEmpty()) {
+            continue;
+        }
+        parts.append(it.key() + u'=' + rendered);
+    }
     return parts.join(u' ');
 }
 
@@ -151,7 +159,7 @@ void collectDnr(const ManifestFacts& manifest, const QList<SourceFile>& files, S
                 const QString type = action.value(QStringLiteral("type")).toString();
                 const QString condition = dnrConditionSummary(rule.value(QStringLiteral("condition")).toObject());
                 if (type == QStringLiteral("allowAllRequests")) {
-                    sig.allowAllRequestsRules++;
+                    sig.allowAllRules.append({rr.id, rule.value(QStringLiteral("id")).toInt(), condition});
                     continue;
                 }
                 if (type == QStringLiteral("redirect")) {
@@ -388,7 +396,15 @@ QJsonObject Signature::toJson() const {
         redirectsJson.append(ro);
     }
     o.insert(QStringLiteral("dnr_redirects"), redirectsJson);
-    o.insert(QStringLiteral("dnr_allow_all_requests"), allowAllRequestsRules);
+    QJsonArray allowJson;
+    for (const DnrAllowRule& r : allowAllRules) {
+        QJsonObject ao;
+        ao.insert(QStringLiteral("ruleset"), r.ruleset);
+        ao.insert(QStringLiteral("rule_id"), r.ruleId);
+        ao.insert(QStringLiteral("condition"), r.condition);
+        allowJson.append(ao);
+    }
+    o.insert(QStringLiteral("dnr_allow_all_requests"), allowJson);
     o.insert(QStringLiteral("dnr_rule_count"), dnrRuleCount);
     o.insert(QStringLiteral("wasm_files"), fromStringList(wasmFiles));
     o.insert(QStringLiteral("analysis_warnings"), fromStringList(analysisWarnings));
@@ -502,7 +518,11 @@ Signature Signature::fromJson(const QJsonObject& o) {
         s.redirects.append({r.value(QStringLiteral("ruleset")).toString(), r.value(QStringLiteral("rule_id")).toInt(),
                             r.value(QStringLiteral("target")).toString(), r.value(QStringLiteral("condition")).toString()});
     }
-    s.allowAllRequestsRules = o.value(QStringLiteral("dnr_allow_all_requests")).toInt();
+    for (const QJsonValue& v : o.value(QStringLiteral("dnr_allow_all_requests")).toArray()) {
+        const QJsonObject a = v.toObject();
+        s.allowAllRules.append({a.value(QStringLiteral("ruleset")).toString(), a.value(QStringLiteral("rule_id")).toInt(),
+                                a.value(QStringLiteral("condition")).toString()});
+    }
     s.wasmFiles = toStringList(o.value(QStringLiteral("wasm_files")));
     s.analysisWarnings = toStringList(o.value(QStringLiteral("analysis_warnings")));
     for (const QJsonValue& v : o.value(QStringLiteral("files")).toArray()) {

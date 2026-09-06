@@ -53,15 +53,22 @@ struct DnrRedirect {
     QString identity() const { return target + u'|' + condition; }
 };
 
-// "urlFilter=… regexFilter=… types=… domains=… initiators=…" for a rule's condition; empty when
-// the rule applies to every request.
+struct DnrAllowRule {
+    QString ruleset;
+    int ruleId = 0;
+    QString condition;  // canonical summary; empty = every request
+};
+
+// Canonical one-line rendering of a whole rule condition: every field, keys in sorted order, list
+// values sorted, so two conditions compare equal exactly when they mean the same thing and a
+// field Chromium adds later is included automatically. Empty when the rule matches every request.
 QString dnrConditionSummary(const QJsonObject& condition);
 
 // The behavior signature of one extension version: what the manifest declares plus what the
 // code can do. Two signatures are compared by the rules engine to produce findings.
 // Bump whenever the facts a signature carries or how they are extracted change; cached
 // signatures with an older schema are recomputed from the archived blobs.
-constexpr int kSignatureSchema = 2;
+constexpr int kSignatureSchema = 3;
 
 struct Signature {
     int schema = kSignatureSchema;
@@ -71,7 +78,7 @@ struct Signature {
 
     QList<DnrHeaderMod> headerMods;
     QList<DnrRedirect> redirects;
-    int allowAllRequestsRules = 0;
+    QList<DnrAllowRule> allowAllRules;  // allowAllRequests rules, one per rule, by condition
     int dnrRuleCount = 0;
     QStringList wasmFiles;
     QStringList analysisWarnings;  // "file: reason" for every place the analysis was incomplete

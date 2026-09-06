@@ -178,7 +178,7 @@ QJsonObject StoreListing::toJson() const {
         o.insert(QStringLiteral("error"), error);
     }
     o.insert(QStringLiteral("fetched_at"), QDateTime::fromSecsSinceEpoch(fetchedAt).toUTC().toString(Qt::ISODate));
-    o.insert(QStringLiteral("parser_version"), 1);  // the listing page is scraped; treat as a sensor, not ground truth
+    o.insert(QStringLiteral("parser_version"), parserVersion);  // the listing page is scraped; treat as a sensor, not ground truth
     return o;
 }
 

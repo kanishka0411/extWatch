@@ -129,7 +129,7 @@ ActionResult restoreQuarantine(Database& db, const QString& dataDir, const QStri
         r.message = QStringLiteral("unknown quarantine %1").arg(quarantineId);
         return r;
     }
-    if (row->state == QStringLiteral("restored")) {
+    if (row->state.startsWith(QStringLiteral("restored"))) {
         r.message = QStringLiteral("quarantine %1 was already restored").arg(quarantineId);
         return r;
     }
@@ -143,7 +143,11 @@ ActionResult restoreQuarantine(Database& db, const QString& dataDir, const QStri
         r.message = error;
         return r;
     }
-    db.setQuarantineState(quarantineId, QStringLiteral("restored"));
+    // A cross-volume restore copies; if the quarantine copy then cannot be deleted, the state
+    // says so, and `doctor` keeps pointing at the leftover until it is gone.
+    db.setQuarantineState(quarantineId, outcome == MoveOutcome::CopiedSourceRemains
+                                            ? QStringLiteral("restored_copy_remaining")
+                                            : QStringLiteral("restored"));
     r.ok = true;
     r.path = row->originalPath;
     r.message = QStringLiteral("Restored %1").arg(row->originalPath);

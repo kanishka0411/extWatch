@@ -610,8 +610,19 @@ QList<Finding> compareSignatures(const Signature& before, const Signature& after
             out.append(make("dnr.redirect", QStringLiteral("Redirect targets: %1.").arg(joinLimited(newTargets, 4)),
                             QString(), 0, thirdParty ? Severity::High : Severity::Medium));
         }
-        if (after.allowAllRequestsRules > before.allowAllRequestsRules) {
-            out.append(make("dnr.allow_all_requests", QStringLiteral("%1 allowAllRequests rule(s).").arg(after.allowAllRequestsRules)));
+        // allowAllRequests rules are compared by condition, so one that used to cover a single site
+        // and now covers every frame is new even though the count did not move.
+        QSet<QString> beforeAllow;
+        for (const DnrAllowRule& r : before.allowAllRules) beforeAllow.insert(r.condition);
+        QStringList newAllow;
+        for (const DnrAllowRule& r : after.allowAllRules) {
+            const QString desc = r.condition.isEmpty() ? QStringLiteral("every request") : r.condition;
+            if (!beforeAllow.contains(r.condition) && !newAllow.contains(desc)) {
+                newAllow.append(desc);
+            }
+        }
+        if (!newAllow.isEmpty()) {
+            out.append(make("dnr.allow_all_requests", QStringLiteral("allowAllRequests for %1.").arg(joinLimited(newAllow, 4))));
         }
         // dynamic: rule updates / header listeners next to security header names in the same file
         QSet<QString> beforeDynamic;

@@ -8,13 +8,13 @@ CI and write-ups. Schema version 1.
 
 | Field | Meaning |
 |---|---|
-| `schema` | `2`. Bumped whenever a field or the way it is extracted changes; a stored signature with an older number is recomputed from the archived blobs (a few per scan after an upgrade, or on demand when a diff needs it), so two versions are always compared with the same analyzer. |
+| `schema` | `3`. Bumped whenever a field or the way it is extracted changes; a stored signature with an older number is recomputed from the archived blobs (a few per scan after an upgrade, or on demand when a diff needs it), so two versions are always compared with the same analyzer. |
 | `version` | Manifest version string. |
 | `key_matches_id` | Whether the `key` in `manifest.json` derives to the extension ID (SHA-256 of the DER public key, first 16 bytes, a-p encoding). `false` means tampered or sideloaded files. |
 | `manifest` | Normalized manifest facts: `manifest_version`, `name`, `description`, `permissions` (API permissions only), `host_permissions` (host patterns, including MV2 patterns moved out of `permissions`), `optional_*`, `content_scripts[]` (each with `matches`, `exclude_matches`, `include_globs`, `exclude_globs`, `js`, `css`, `run_at`, `world`, `all_frames`, `match_about_blank`, `match_origin_as_fallback`; compared per declaration, keyed by its script and style files plus its match patterns, so two declarations that inject the same file into different sites are tracked separately), `background`, `externally_connectable` (`matches` and `ids`, where `*` means any extension), `web_accessible_resources`, `content_security_policy`, `dnr_rule_resources`, `update_url`, `key`, `raw` (the manifest as shipped). |
-| `dnr_header_mods[]` | Static declarativeNetRequest rules that modify security-relevant headers: `ruleset`, `rule_id`, `header` (lower-case), `operation` (`remove`, `set`, `append`), `value` (for set and append), `condition` (canonical summary of the rule condition: `urlFilter`, `regexFilter`, resource types, request and initiator domains; empty means every request). A modification is compared by all four, so widening a CSP removal from one site to every request, or weakening a set value, is a new finding. Findings distinguish a removal (High) from a set or append (Medium). |
+| `dnr_header_mods[]` | Static declarativeNetRequest rules that modify security-relevant headers: `ruleset`, `rule_id`, `header` (lower-case), `operation` (`remove`, `set`, `append`), `value` (for set and append), `condition` (the whole rule condition rendered canonically: every field, keys sorted, list values sorted, so a field Chromium adds later takes part automatically; empty means every request). A modification is compared by all four, so widening a CSP removal from one site to every request, or weakening a set value, is a new finding. Findings distinguish a removal (High) from a set or append (Medium). |
 | `dnr_redirects[]` | Static redirect rules: `ruleset`, `rule_id`, `target` (URL, regex substitution or transform summary), `condition` (as above). |
-| `dnr_allow_all_requests` | Number of `allowAllRequests` rules. |
+| `dnr_allow_all_requests[]` | `allowAllRequests` rules: `ruleset`, `rule_id`, `condition`. Compared by condition, so a rule that grew from one site to every frame is a finding even though the count did not change. |
 | `dnr_rule_count` | Number of static rules. |
 | `wasm_files[]` | `.wasm` modules in the package (their contents are not analyzed). |
 | `analysis_warnings[]` | `file: reason` for every place the analysis was incomplete: files above 48 MiB, nesting deeper than 400 levels, entries a package loader refused to inflate, parse errors. A signature with warnings yields an `analysis.incomplete` finding. |
@@ -50,6 +50,10 @@ is empty and the findings describe the extension's risk profile.
 
 Severities: `high`, `medium`, `low`, `info`. The rule list with explanations is in
 [`rules/rules.v1.json`](../rules/rules.v1.json) and printed by `extwatch rules`.
+
+Each stored event records `findings_schema`, the rules generation that produced its findings.
+When the generation changes, the next scan recomputes findings for older events from the cached
+signatures (newest first, fifty per scan), so the timeline never keeps yesterday's severity.
 
 Findings are sorted by severity, then by rule order. `findings_summary` (in scan events) is a
 one-line digest of the top findings, used for notifications:

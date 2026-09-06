@@ -313,6 +313,23 @@ private slots:
         QCOMPARE(back.headerMods.first().condition, v1.headerMods.first().condition);
     }
 
+    void allowAllRequestsScopeIsCompared() {
+        const QByteArray manifest = manifestWith("\"declarative_net_request\":{\"rule_resources\":[{\"id\":\"r\",\"enabled\":true,\"path\":\"rules.json\"}]}");
+        const QByteArray oneSite = "[{\"id\":1,\"priority\":2,\"action\":{\"type\":\"allowAllRequests\"},\"condition\":{\"resourceTypes\":[\"main_frame\"],\"requestDomains\":[\"mine.example.com\"]}}]";
+        const QByteArray everySite = "[{\"id\":1,\"priority\":2,\"action\":{\"type\":\"allowAllRequests\"},\"condition\":{\"resourceTypes\":[\"main_frame\",\"sub_frame\"]}}]";
+        const Signature v1 = sigFromSources({src("manifest.json", manifest), src("rules.json", oneSite)});
+        const Signature v2 = sigFromSources({src("manifest.json", manifest), src("rules.json", everySite)});
+        QCOMPARE(v1.allowAllRules.size(), 1);
+        QCOMPARE(v2.allowAllRules.size(), 1);  // same count, different reach
+        QCOMPARE(v1.allowAllRules.first().condition, QStringLiteral("requestDomains=mine.example.com resourceTypes=main_frame"));
+        QVERIFY(hasRule(compareSignatures(v1, v2), "dnr.allow_all_requests"));
+        QVERIFY(!hasRule(compareSignatures(v1, v1), "dnr.allow_all_requests"));
+        QCOMPARE(Signature::fromJson(v1.toJson()).allowAllRules.first().condition, v1.allowAllRules.first().condition);
+        // Every condition field takes part, including ones this code has never heard of.
+        QCOMPARE(dnrConditionSummary(QJsonDocument::fromJson("{\"futureField\":[\"b\",\"a\"],\"isUrlFilterCaseSensitive\":false}").object()),
+                 QStringLiteral("futureField=a,b isUrlFilterCaseSensitive=false"));
+    }
+
     void oversizedFilesAreNeverReadIntoMemory() {
         QTemporaryDir tmp;
         QFile manifest(tmp.path() + QStringLiteral("/manifest.json"));
