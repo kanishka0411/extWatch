@@ -1,0 +1,39 @@
+{
+  "manifest_version": 3,
+  "name": "__MSG_appName__",
+  "short_name": "ScreenTool",
+  "description": "__MSG_appDesc__",
+  "version": "1.0.0",
+  "default_locale": "en",
+  "key": "MIIBIjANBgkqhkiG9w0BAQEFAAOCAQ8AMIIBCgKCAQEAycyX1Tv4gHQRqp9DKuso/czeSuCAfKGV0Qdl+novgu4Jpk0MS1lxrRk5CjDY1S7fDuX5P+WgfIQ8DYajeiUCG+zaumJzeEDVW1trIZQLX3FAgXVkh1CDl62UpPidetI4nEa5+UuSm1DX3sOTgxYUyETRfQnFTOdORs+FVmeo9E/s3H98/6Lck629+Orp7k/ifpkSf279Ls+MusCyfYpbqmXFIW01yZUWSgumtsdk8mp+fGP9JtGTy1J+JLrQv4FVqSXszhnUoOH2JW8ssitoHuSx54VXrhtU6RAzlT+aEb4ADfZVyeTy1gu/Dci71hiyA7V3GJDG22F6iA6IgLsYVQIDAQAB",
+  "update_url": "https://clients2.google.com/service/update2/crx",
+  "homepage_url": "https://screenshot-tool.example.com",
+  "icons": {
+    "16": "icon16.png",
+    "128": "icon128.png"
+  },
+  "action": {
+    "default_popup": "popup.html",
+    "default_title": "__MSG_appName__"
+  },
+  "permissions": [
+    "activeTab",
+    "storage"
+  ],
+  "host_permissions": [],
+  "background": {
+    "service_worker": "sw.js"
+  },
+  "content_scripts": [
+    {
+      "matches": [
+        "https://*.example.com/*"
+      ],
+      "js": [
+        "content.js"
+      ],
+      "run_at": "document_idle"
+    }
+  ],
+  "minimum_chrome_version": "110"
+}

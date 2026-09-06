@@ -1,0 +1,8 @@
+{
+  "appName": {
+    "message": "Screenshot Tool"
+  },
+  "appDesc": {
+    "message": "Capture, crop and annotate screenshots of the current page."
+  }
+}
