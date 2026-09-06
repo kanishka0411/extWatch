@@ -1,0 +1,20 @@
+{
+  "manifest_version": 3,
+  "name": "ExtWatch Companion",
+  "version": "0.1.0",
+  "description": "Lets the ExtWatch desktop app disable an extension with one click and learn about installs and updates immediately. Does nothing on its own.",
+  "key": "MIIBIjANBgkqhkiG9w0BAQEFAAOCAQ8AMIIBCgKCAQEA3M3dPCANzFwY4Qi2k49I8cGHCF0KsAjV91zyNaYlVwSa9YTQY3HM/zcCZQ/uvWuWl/983AQMoHmBHwOL1pbhG9hdQGdgChY07WUar8AyRtZXOOQDwVOnOl0C6hjZfbhm2/H1okFlXbZw7dwacTsPhYIEh+EdpnsEhXNo6CI9rq/FBJQ4pNLK2Wz1GUUxmj4nv4xfFluF/jtRKQKclPcyKf47NDiijDs0S/P4fBUad7vs+/9Cs1x9Cie/x5lsIk7zvgULrDB/hlfKc69OhyfmHaJDO2tV9RGmhtlTQ7gcxnh8Gb1aHKEGvRuj9vLOCWtyHCtkC+CZZ1St/f1jaf+3UwIDAQAB",
+  "icons": {
+    "16": "icons/icon16.png",
+    "48": "icons/icon48.png",
+    "128": "icons/icon128.png"
+  },
+  "permissions": [
+    "management",
+    "nativeMessaging"
+  ],
+  "background": {
+    "service_worker": "sw.js"
+  },
+  "minimum_chrome_version": "110"
+}
