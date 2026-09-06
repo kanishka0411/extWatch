@@ -208,4 +208,4 @@ Developer mode on. Monitoring stays outside the browser; only the switch lives i
 
 ## License
 
-MIT. See [LICENSE](LICENSE); third-party components are listed in [THIRD_PARTY.md](THIRD_PARTY.md).
+MIT
