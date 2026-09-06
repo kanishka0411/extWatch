@@ -8,6 +8,7 @@
 #include "core/blobstore.h"
 #include "core/database.h"
 #include "core/discovery.h"
+#include "core/hashing.h"
 #include "core/inventory.h"
 #include "core/scanner.h"
 #include "testutil.h"
@@ -327,6 +328,105 @@ private slots:
         q.state = QStringLiteral("quarantined");
         QVERIFY(db.insertQuarantine(q));
         QCOMPARE(db.quarantinesForExtension(1).size(), 1);
+    }
+
+    void deletedProfilesGetRemovalEvents() {
+        QTemporaryDir tmp;
+        const QString userData = tmp.path() + QStringLiteral("/User Data");
+        const QString profilePath = testutil::makeFakeUserDataDir(userData, QStringLiteral("Default"), QStringLiteral("1.0.0"));
+        ScanOptions opts;
+        opts.dataDir = tmp.path() + QStringLiteral("/data");
+        opts.settleSeconds = 0;
+        opts.candidates = {{BrowserKind::Chrome, QStringLiteral("Test Chrome"), userData}};
+        QCOMPARE(runScan(opts).events.size(), 1);
+        // The browser deletes the profile: directory and Local State entry are both gone.
+        QVERIFY(QDir(profilePath).removeRecursively());
+        QJsonObject localState = testutil::readJson(userData + QStringLiteral("/Local State"));
+        QJsonObject profile = localState.value(QStringLiteral("profile")).toObject();
+        profile.insert(QStringLiteral("info_cache"), QJsonObject());
+        localState.insert(QStringLiteral("profile"), profile);
+        QVERIFY(testutil::writeJson(userData + QStringLiteral("/Local State"), localState));
+        // A scan restricted to one profile must not touch the others; a full scan reconciles.
+        ScanOptions restricted = opts;
+        restricted.onlyProfile = QStringLiteral("Other");
+        QVERIFY(runScan(restricted).events.isEmpty());
+        const ScanResult full = runScan(opts);
+        QStringList kinds;
+        for (const ScanEvent& e : full.events) kinds.append(e.kind);
+        QVERIFY2(full.events.size() == 1, qPrintable(QStringLiteral("events: [%1] warnings: [%2]").arg(kinds.join(u','), full.warnings.join(u';'))));
+        QCOMPARE(full.events.first().kind, QStringLiteral("removed"));
+        QCOMPARE(full.events.first().extId, testutil::fixtureExtensionId());
+        QVERIFY(runScan(opts).events.isEmpty());  // reported once, not on every later scan
+    }
+
+    void versionRefsAreExplicitAboutAmbiguity() {
+        QTemporaryDir tmp;
+        Database db;
+        QString error;
+        QVERIFY2(db.open(tmp.path() + QStringLiteral("/db.sqlite"), &error), qPrintable(error));
+        const qint64 browser = db.upsertBrowser(QStringLiteral("chrome"), QStringLiteral("/x"), QStringLiteral("Chrome"), 1);
+        const qint64 profile = db.upsertProfile(browser, QStringLiteral("Default"), QStringLiteral("Default"), 1);
+        const qint64 extId = db.upsertExtension(profile, QStringLiteral("abcdefghijklmnopabcdefghijklmnop"), QStringLiteral("Old"), 1, true, true, 1);
+        auto version = [&](const QString& v, const QString& hash) {
+            VersionRow row;
+            row.extensionId = extId;
+            row.version = v;
+            row.dirName = v + QStringLiteral("_0");
+            row.treeHash = hash;
+            row.firstSeen = row.lastSeen = 1;
+            QVERIFY(db.insertVersion(row) > 0);
+        };
+        version(QStringLiteral("1.0"), QStringLiteral("aaaa1111"));
+        version(QStringLiteral("1.0"), QStringLiteral("aaaa2222"));  // same version, different bytes
+        version(QStringLiteral("2.0"), QStringLiteral("bbbb0000"));
+        QString note;
+        QVERIFY(resolveVersionRef(db, extId, QStringLiteral("2.0"), &note));
+        QVERIFY(note.isEmpty());
+        const auto newest = resolveVersionRef(db, extId, QStringLiteral("1.0"), &note);
+        QVERIFY(newest);
+        QCOMPARE(newest->treeHash, QStringLiteral("aaaa2222"));
+        QVERIFY2(note.contains(QStringLiteral("using the newest")), qPrintable(note));
+        note.clear();
+        QVERIFY(!resolveVersionRef(db, extId, QStringLiteral("1.0@aaaa"), &note));  // matches both
+        QVERIFY2(note.contains(QStringLiteral("matches 2 snapshots")), qPrintable(note));
+        note.clear();
+        const auto exact = resolveVersionRef(db, extId, QStringLiteral("@aaaa1"), &note);
+        QVERIFY(exact);
+        QCOMPARE(exact->treeHash, QStringLiteral("aaaa1111"));
+        QVERIFY(note.isEmpty());
+        QVERIFY(!resolveVersionRef(db, extId, QStringLiteral("3.0"), &note));
+    }
+
+    void fingerprintSeesPerFileChanges() {
+        QTemporaryDir tmp;
+        auto write = [&](const QString& name, const QByteArray& bytes) {
+            QFile f(tmp.path() + u'/' + name);
+            QVERIFY(f.open(QIODevice::WriteOnly | QIODevice::Truncate));
+            f.write(bytes);
+        };
+        write(QStringLiteral("a.js"), "aaaa");
+        write(QStringLiteral("b.js"), "bb");
+        const QString before = directoryFingerprint(tmp.path());
+        // Swap the sizes: file count, total bytes and newest mtime can all stay the same.
+        write(QStringLiteral("a.js"), "aa");
+        write(QStringLiteral("b.js"), "bbbb");
+        const QString after = directoryFingerprint(tmp.path());
+        QVERIFY(before != after);
+        QCOMPARE(directoryFingerprint(tmp.path()), after);
+    }
+
+    void forcedHashIgnoresStoredFingerprints() {
+        QTemporaryDir tmp;
+        const QString userData = tmp.path() + QStringLiteral("/User Data");
+        testutil::makeFakeUserDataDir(userData, QStringLiteral("Default"), QStringLiteral("1.0.0"));
+        ScanOptions opts;
+        opts.dataDir = tmp.path() + QStringLiteral("/data");
+        opts.settleSeconds = 0;
+        opts.candidates = {{BrowserKind::Chrome, QStringLiteral("Test Chrome"), userData}};
+        runScan(opts);
+        QVERIFY(runScan(opts).browsers.first().profiles.first().extensions.first().versions.first().reused);
+        opts.forceHash = true;
+        QVERIFY(!runScan(opts).browsers.first().profiles.first().extensions.first().versions.first().reused);
     }
 
     void quarantineIsScopedToOneProfileAndRestoresToItsOrigin() {

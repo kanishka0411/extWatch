@@ -159,7 +159,12 @@ void TrayApp::rescan() {
     m_rescanAction->setEnabled(false);
     m_statusAction->setText(m_firstScan ? QStringLiteral("Scanning… (the first run analyzes every extension)")
                                         : QStringLiteral("Scanning…"));
-    m_watcher->setFuture(QtConcurrent::run(runScan, scanOptions()));
+    ScanOptions options = scanOptions();
+    // Stored fingerprints (per-file size and mtime) make rescans cheap; every fourth scan and the
+    // first one after launch re-hash every tree so a same-size, same-mtime overwrite is caught.
+    options.forceHash = m_firstScan || m_scansSinceFullHash >= 3;
+    m_scansSinceFullHash = options.forceHash ? 0 : m_scansSinceFullHash + 1;
+    m_watcher->setFuture(QtConcurrent::run(runScan, options));
 }
 
 void TrayApp::onScanFinished() {

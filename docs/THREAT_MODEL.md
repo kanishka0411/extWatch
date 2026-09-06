@@ -26,3 +26,10 @@ extension version and analyzes their code. This is what it defends against and w
   identified by its database row, never by extension ID alone.
 - **The companion is small and checkable.** About 150 lines, two permissions, no network; the
   extracted copy is compared with the embedded one.
+- **Rescans trust per-file metadata, sweeps re-hash.** Between full hashes an unchanged version
+  directory is recognised by a fingerprint over every file's path, size and mtime. A rewrite that
+  preserves all three for a file would pass; the first scan after launch, every fourth scan, and
+  `extwatch scan --verify` hash every file again.
+- **Ambiguity fails closed.** A Disable request that could reach two profiles with identical
+  extension inventories is refused, and a `version@hash` reference that matches more than one
+  snapshot is an error, rather than a guess.

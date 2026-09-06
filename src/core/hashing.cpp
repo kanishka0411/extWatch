@@ -30,18 +30,30 @@ QString toHex(const QByteArray& bytes) {
 }
 
 QString directoryFingerprint(const QString& rootDir) {
+    // Per-file path, size and mtime, hashed together: a swap of two files that keeps the totals
+    // identical still changes the fingerprint. Content is not read.
     qint64 files = 0;
     qint64 bytes = 0;
     qint64 newest = 0;
+    QList<QString> lines;
     QDirIterator it(rootDir, QDir::Files | QDir::Hidden | QDir::NoSymLinks | QDir::NoDotAndDotDot,
                     QDirIterator::Subdirectories);
+    const QDir root(rootDir);
     while (it.hasNext()) {
         const QFileInfo fi = it.nextFileInfo();
         ++files;
         bytes += fi.size();
-        newest = qMax(newest, fi.lastModified().toMSecsSinceEpoch());
+        const qint64 mtime = fi.lastModified().toMSecsSinceEpoch();
+        newest = qMax(newest, mtime);
+        lines.append(root.relativeFilePath(fi.filePath()) + u'|' + QString::number(fi.size()) + u'|' + QString::number(mtime));
     }
-    return QStringLiteral("%1:%2:%3").arg(files).arg(bytes).arg(newest);
+    std::sort(lines.begin(), lines.end());
+    QCryptographicHash h(QCryptographicHash::Sha256);
+    for (const QString& l : lines) {
+        h.addData(l.toUtf8());
+        h.addData(QByteArrayView("\n", 1));
+    }
+    return QStringLiteral("%1:%2:%3:%4").arg(files).arg(bytes).arg(newest).arg(QString::fromLatin1(h.result().toHex().left(16)));
 }
 
 TreeSnapshot hashTree(const QString& rootDir) {

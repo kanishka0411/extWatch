@@ -3,6 +3,7 @@
 #include <QDir>
 #include <QFile>
 #include <QJsonArray>
+#include <QSet>
 #include <QThread>
 #include <QJsonDocument>
 
@@ -10,12 +11,22 @@
 #include "core/chrometime.h"
 #include "core/database.h"
 #include "core/analyzer.h"
+#include "core/signature.h"
 #include "core/hashing.h"
 #include "core/inventory.h"
 #include "core/jsonutil.h"
 #include "extwatch/version.h"
 
 namespace extwatch {
+
+int scanExitCode(const ScanResult& result) {
+    for (const ScanEvent& e : result.events) {
+        if (e.kind != QStringLiteral("baseline") && e.maxSeverity == QStringLiteral("high")) {
+            return 3;
+        }
+    }
+    return result.warnings.isEmpty() ? 0 : 1;
+}
 
 QString defaultDataDir() {
     const QString override = qEnvironmentVariable("EXTWATCH_DATA_DIR");
@@ -173,6 +184,7 @@ struct PersistContext {
     BlobStore* blobs = nullptr;
     qint64 now = 0;
     bool needsRescan = false;
+    QSet<qint64> seenExtensions;  // extension rows visited by this scan; the rest may be gone
 };
 
 // Records one extension of one profile into the database and turns differences against the
@@ -184,6 +196,9 @@ void persistExtension(PersistContext& ctx, qint64 profileId, const InstalledExte
     const std::optional<ExtensionRow> before = db.findExtension(profileId, ext.id);
     const qint64 extensionId = db.upsertExtension(profileId, ext.id, report.name, report.location,
                                                   report.fromWebstore, report.enabled, ctx.now);
+    if (extensionId >= 0) {
+        ctx.seenExtensions.insert(extensionId);
+    }
     if (extensionId < 0) {
         report.notes.append(QStringLiteral("database error: %1").arg(db.lastError()));
         return;
@@ -339,8 +354,8 @@ void recordRemovals(PersistContext& ctx, qint64 profileId, const BrowserReport& 
                     const Profile& profile, QList<ScanEvent>& events) {
     Database& db = *ctx.db;
     for (const ExtensionRow& row : db.extensionsForProfile(profileId)) {
-        if (row.lastSeen >= ctx.now) {
-            continue;
+        if (ctx.seenExtensions.contains(row.id)) {
+            continue;  // membership, not a timestamp: two scans in the same second stay correct
         }
         const QList<EventRow> history = db.eventsForExtension(row.id);
         if (!history.isEmpty() && history.last().kind == QStringLiteral("removed")) {
@@ -375,7 +390,7 @@ void recordRemovals(PersistContext& ctx, qint64 profileId, const BrowserReport& 
 }
 
 ExtensionReport buildReport(const InstalledExtension& ext, bool computeHashes, int settleSeconds,
-                            const QHash<QString, VersionRow>& knownByDir) {
+                            const QHash<QString, VersionRow>& knownByDir, bool forceHash) {
     ExtensionReport r;
     r.id = ext.id;
     r.name = ext.displayName();
@@ -415,7 +430,7 @@ ExtensionReport buildReport(const InstalledExtension& ext, bool computeHashes, i
         if (computeHashes) {
             vr.fingerprint = directoryFingerprint(vd.path);
             const auto known = knownByDir.constFind(vd.dirName);
-            if (known != knownByDir.constEnd() && !known->statFingerprint.isEmpty() &&
+            if (!forceHash && known != knownByDir.constEnd() && !known->statFingerprint.isEmpty() &&
                 known->statFingerprint == vr.fingerprint) {
                 // Nothing on disk changed since this tree was archived: skip the hashing.
                 vr.treeHash = known->treeHash;
@@ -516,7 +531,7 @@ ScanResult runScan(const ScanOptions& options) {
                         }
                     }
                 }
-                ExtensionReport report = buildReport(ext, options.computeHashes, options.settleSeconds, known);
+                ExtensionReport report = buildReport(ext, options.computeHashes, options.settleSeconds, known, options.forceHash);
                 if (profileId) {
                     persistExtension(ctx, *profileId, ext, report, br, profile, result.events);
                 }
@@ -532,6 +547,37 @@ ScanResult runScan(const ScanOptions& options) {
 
     result.needsRescan = ctx.needsRescan;
 
+    // Profiles the browser deleted (or a browser that was uninstalled) are never visited above.
+    // Within the browsers this scan was asked to cover, a known profile that was not seen has
+    // its extensions recorded as removed. Filtered scans leave everything else alone.
+    if (canPersist && !options.onlyBrowser && options.onlyProfile.isEmpty()) {
+        QSet<QString> scope;
+        for (const BrowserInstall& c : candidates) {
+            scope.insert(QDir::cleanPath(c.userDataDir));
+        }
+        QSet<qint64> seenProfiles;
+        for (const BrowserReport& b : result.browsers) {
+            for (const ProfileReport& p : b.profiles) {
+                if (p.profileRowId) {
+                    seenProfiles.insert(*p.profileRowId);
+                }
+            }
+        }
+        for (const BrowserRow& b : db.browsers()) {
+            if (!scope.contains(QDir::cleanPath(b.userDataDir))) {
+                continue;
+            }
+            for (const ProfileRow& p : db.profilesForBrowser(b.id)) {
+                if (seenProfiles.contains(p.id)) {
+                    continue;
+                }
+                BrowserReport br;
+                br.install = {browserKindFromId(b.kind).value_or(BrowserKind::Chrome), b.displayName, b.userDataDir};
+                recordRemovals(ctx, p.id, br, {p.dirName, p.displayName, QString()}, result.events);
+            }
+        }
+    }
+
     if (canPersist && options.analyze) {
         for (ScanEvent& ev : result.events) {
             if (!ev.eventRowId || !ev.toVersionRowId) {
@@ -544,6 +590,20 @@ ScanResult runScan(const ScanOptions& options) {
         // Events left without findings by an earlier crash or interrupted run.
         for (const EventRow& e : db.unanalyzedEvents(20)) {
             analyzeEvent(db, *blobs, e.id);
+        }
+        // Signatures written by an older analyzer are recomputed from the archived blobs, a few
+        // per scan, so an upgrade does not stall the first scan and old versions compare like
+        // for like with new ones.
+        int refreshed = 0;
+        for (const VersionRow& v : db.allVersions()) {
+            if (refreshed >= 8 || v.signatureJson.isEmpty()) {
+                continue;
+            }
+            const QJsonObject json = QJsonDocument::fromJson(v.signatureJson.toUtf8()).object();
+            if (json.value(QStringLiteral("schema")).toInt() != kSignatureSchema) {
+                signatureForVersion(db, *blobs, v.id);
+                ++refreshed;
+            }
         }
     }
 

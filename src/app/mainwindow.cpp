@@ -188,6 +188,11 @@ void MainWindow::reloadTree() {
                 }
                 item->setToolTip(0, tip);
             }
+            if (group->childCount() == 0) {
+                // Every extension of this profile was removed (or the profile itself is gone).
+                delete group;
+                profiles--;
+            }
         }
     }
     m_tree->blockSignals(false);

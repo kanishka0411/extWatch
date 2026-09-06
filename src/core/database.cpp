@@ -819,4 +819,30 @@ QList<QuarantineRow> Database::allQuarantines() {
     return out;
 }
 
+std::optional<VersionRow> resolveVersionRef(Database& db, qint64 extensionRowId, const QString& ref, QString* note) {
+    const QString version = ref.section(u'@', 0, 0);
+    const QString hashPrefix = ref.contains(u'@') ? ref.section(u'@', 1).toLower() : QString();
+    std::optional<VersionRow> found;
+    int matches = 0;
+    for (const VersionRow& v : db.versionsForExtension(extensionRowId)) {
+        if (!version.isEmpty() && v.version != version) continue;
+        if (!hashPrefix.isEmpty() && !v.treeHash.startsWith(hashPrefix)) continue;
+        matches++;
+        found = v;  // versionsForExtension is ordered oldest first: keep the newest
+    }
+    if (matches > 1 && !hashPrefix.isEmpty()) {
+        // A short prefix that matches several snapshots is ambiguous; refuse rather than pick one.
+        if (note) {
+            *note = QStringLiteral("hash prefix %1 matches %2 snapshots of version %3; give more characters")
+                        .arg(hashPrefix).arg(matches).arg(version.isEmpty() ? QStringLiteral("(any)") : version);
+        }
+        return std::nullopt;
+    }
+    if (matches > 1 && hashPrefix.isEmpty() && note) {
+        *note = QStringLiteral("%1 snapshots carry version %2; using the newest (%3). Address one with %2@<tree hash>.")
+                    .arg(matches).arg(version, found->treeHash.left(12));
+    }
+    return found;
+}
+
 }  // namespace extwatch

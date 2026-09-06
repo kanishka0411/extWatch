@@ -88,6 +88,7 @@ QString usage() {
         "  --no-store           Do not write snapshots to the archive\n"
         "  --no-hash            Skip file hashing (implies --no-store)\n"
         "  --no-analyze         Skip signature analysis during scan\n"
+        "  --verify             Re-hash every installed tree (scan); default trusts unchanged fingerprints\n"
         "  --html <file>        Write a self-contained HTML report (diff, report)\n"
         "  --full               Do not cap per-file diff output (diff, report)\n"
         "  --compact            Compact JSON\n"
@@ -125,6 +126,7 @@ struct CommonOptions {
     bool store = true;
     bool hash = true;
     bool analyze = true;
+    bool verify = false;
     QString html;
     bool full = false;
     bool verifyBlobs = false;
@@ -142,6 +144,7 @@ bool parseCommon(QCommandLineParser& parser, const QStringList& args, CommonOpti
         {QStringLiteral("no-store"), QStringLiteral("Do not write snapshots")},
         {QStringLiteral("no-hash"), QStringLiteral("Skip hashing")},
         {QStringLiteral("no-analyze"), QStringLiteral("Skip analysis")},
+        {QStringLiteral("verify"), QStringLiteral("Re-hash every tree instead of trusting stored fingerprints")},
         {QStringLiteral("html"), QStringLiteral("Write HTML report"), QStringLiteral("file")},
         {QStringLiteral("full"), QStringLiteral("Uncapped diff output")},
         {QStringLiteral("verify-blobs"), QStringLiteral("Re-hash every archived blob")},
@@ -170,30 +173,11 @@ bool parseCommon(QCommandLineParser& parser, const QStringList& args, CommonOpti
         opts.store = false;
     }
     opts.analyze = !parser.isSet(QStringLiteral("no-analyze"));
+    opts.verify = parser.isSet(QStringLiteral("verify"));
     opts.html = parser.value(QStringLiteral("html"));
     opts.full = parser.isSet(QStringLiteral("full"));
     opts.verifyBlobs = parser.isSet(QStringLiteral("verify-blobs"));
     return true;
-}
-
-// Resolves "1.2.0", "1.2.0@abc123" or "@abc123" against the archived versions of one extension.
-// A bare version string that was archived more than once resolves to the newest snapshot.
-std::optional<VersionRow> resolveVersionRef(Database& db, qint64 extensionRowId, const QString& ref, QString* note) {
-    const QString version = ref.section(u'@', 0, 0);
-    const QString hashPrefix = ref.contains(u'@') ? ref.section(u'@', 1).toLower() : QString();
-    std::optional<VersionRow> found;
-    int matches = 0;
-    for (const VersionRow& v : db.versionsForExtension(extensionRowId)) {
-        if (!version.isEmpty() && v.version != version) continue;
-        if (!hashPrefix.isEmpty() && !v.treeHash.startsWith(hashPrefix)) continue;
-        matches++;
-        found = v;  // versionsForExtension is ordered oldest first: keep the newest
-    }
-    if (matches > 1 && hashPrefix.isEmpty() && note) {
-        *note = QStringLiteral("%1 snapshots carry version %2; using the newest (%3). Address one with %2@<tree hash>.")
-                    .arg(matches).arg(version, found->treeHash.left(12));
-    }
-    return found;
 }
 
 ScanOptions toScanOptions(const CommonOptions& c) {
@@ -202,6 +186,7 @@ ScanOptions toScanOptions(const CommonOptions& c) {
     o.persist = c.store;
     o.computeHashes = c.hash;
     o.analyze = c.analyze;
+    o.forceHash = c.verify;
     o.onlyBrowser = c.browser;
     o.onlyProfile = c.profile;
     for (const QString& dir : c.userDataDirs) {
@@ -219,7 +204,7 @@ int cmdScan(const CommonOptions& c) {
     const ScanResult result = runScan(toScanOptions(c));
     if (c.json) {
         printJson(result.toJson(), c.compact);
-        return result.warnings.isEmpty() ? 0 : 1;
+        return scanExitCode(result);
     }
     for (const BrowserReport& b : result.browsers) {
         for (const ProfileReport& p : b.profiles) {
@@ -289,7 +274,7 @@ int cmdScan(const CommonOptions& c) {
     }
     out().flush();
     err().flush();
-    return result.warnings.isEmpty() ? 0 : 1;
+    return scanExitCode(result);
 }
 
 QString locate(Database& db, const ExtensionRow& ext) {

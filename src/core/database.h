@@ -168,4 +168,9 @@ private:
     QString m_lastError;
 };
 
+// Resolves "1.2.0", "1.2.0@abc123" or "@abc123" against the archived versions of one extension.
+// A bare version that was archived more than once resolves to the newest snapshot (with a note);
+// a hash prefix that matches more than one snapshot resolves to nothing and explains why.
+std::optional<VersionRow> resolveVersionRef(Database& db, qint64 extensionRowId, const QString& ref, QString* note);
+
 }  // namespace extwatch

@@ -20,6 +20,7 @@ struct ScanOptions {
     bool persist = true;
     bool computeHashes = true;
     bool analyze = true;  // compute signatures and findings for new events
+    bool forceHash = false;  // ignore stored fingerprints and re-hash every tree (integrity sweep)
     int settleSeconds = 3;  // a version directory modified more recently than this is still being written
     int settleRetries = 2;  // how many times a scan waits and retries for unsettled directories
     std::optional<BrowserKind> onlyBrowser;
@@ -111,6 +112,10 @@ struct ScanResult {
     int extensionCount() const;
     QJsonObject toJson() const;
 };
+
+// Exit code for `extwatch scan`: 3 when a non-baseline event has a High finding, 1 on operational
+// warnings, 0 otherwise.
+int scanExitCode(const ScanResult& result);
 
 // Per-user data directory for the database and blob store.
 QString defaultDataDir();

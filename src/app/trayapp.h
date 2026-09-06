@@ -72,6 +72,7 @@ private:
     QPointer<MainWindow> m_window;
     bool m_firstScan = true;
     bool m_rescanQueued = false;
+    int m_scansSinceFullHash = 0;  // fingerprints are trusted between full integrity sweeps
     bool m_showOnStart = false;
     ScanResult m_lastResult;
 };

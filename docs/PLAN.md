@@ -17,7 +17,7 @@ today; where they disagree, the table wins.
 | Atomic snapshots | Done | Blobs first, then version and file rows in one transaction; no snapshot without its blobs |
 | Version stability gate | Done | Files newer than 3 s or a tree that changed while hashing are retried, up to twice |
 | Fingerprint reuse | Done | Unchanged trees (files, bytes, newest mtime) are not re-hashed |
-| Event kinds | Done | baseline, updated, modified_in_place (same version, different bytes), pending_version (also on first scan), enabled, disabled, removed |
+| Event kinds | Done | baseline, updated, modified_in_place (same version, different bytes), pending_version (also on first scan), enabled, disabled, removed (also for a profile the browser deleted, reconciled after every unfiltered scan) |
 | Database migrations | Done | `schema_version` with ordered migrations; refuses newer databases; schema 2 today |
 | Crash recovery | Done | Events left without findings are analyzed on the next scan |
 | Behavior signatures | Done | tree-sitter facts, prettified line numbers, per-file parallel analysis on a bounded low-priority pool |
@@ -218,7 +218,8 @@ Blobs: `blobs/<first two hex>/<sha256>`, deduplicated across versions and extens
 ```
 extwatch scan [--json] [--browser chrome|brave|edge|chromium] [--profile NAME]   inventory + signatures
 extwatch analyze <dir|zip|crx> [--json]                                           analyze any extension package
-extwatch diff <ext_id> <vA> <vB> [--json] [--html out.html]                        exit 2 if any High finding
+extwatch diff <ext_id> <vA> <vB> [--json] [--html out.html]                        exit 3 if any High finding
+extwatch scan [--verify]                                                          exit 3 if a non-baseline event has a High finding
 extwatch history <ext_id>                                                          versions and events
 extwatch export <ext_id> <version> <out.zip|out_dir>                               for rollback or sharing
 extwatch watch --headless [--jsonl]                                                daemon mode for servers and CI
