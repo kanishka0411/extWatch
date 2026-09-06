@@ -1,0 +1,53 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="960" height="300" viewBox="0 0 960 300" font-family="-apple-system, Segoe UI, Roboto, Helvetica, Arial, sans-serif" font-size="14">
+  <defs>
+    <marker id="arrow" markerWidth="10" markerHeight="10" refX="9" refY="5" orient="auto"><path d="M0,0 L10,5 L0,10 z" fill="#8b93a7"/></marker>
+    <style>
+      .box{fill:#f6f7fa;stroke:#c9ced9;stroke-width:1.5;rx:10}
+      .hot{fill:#eef3ff;stroke:#3d6cf5}
+      .t{fill:#1a1d26;font-weight:600}
+      .s{fill:#5b647a;font-size:12px}
+      .a{stroke:#8b93a7;stroke-width:1.5;fill:none;marker-end:url(#arrow)}
+      @media (prefers-color-scheme: dark){.box{fill:#171a23;stroke:#2a2f3c}.hot{fill:#16213a;stroke:#5b8dff}.t{fill:#e6e8ee}.s{fill:#9aa3b5}}
+    </style>
+  </defs>
+  <!-- row 1 -->
+  <rect class="box" x="20" y="40" width="170" height="90" rx="10"/>
+  <text class="t" x="105" y="70" text-anchor="middle">Browser profiles</text>
+  <text class="s" x="105" y="92" text-anchor="middle">Chrome · Brave · Edge · Arc</text>
+  <text class="s" x="105" y="110" text-anchor="middle">Extensions/&lt;id&gt;/&lt;version&gt;/</text>
+
+  <rect class="box" x="230" y="40" width="170" height="90" rx="10"/>
+  <text class="t" x="315" y="70" text-anchor="middle">Watcher</text>
+  <text class="s" x="315" y="92" text-anchor="middle">file events, debounced</text>
+  <text class="s" x="315" y="110" text-anchor="middle">+ rescan on start / 15 min</text>
+
+  <rect class="box" x="440" y="40" width="170" height="90" rx="10"/>
+  <text class="t" x="525" y="70" text-anchor="middle">Snapshot</text>
+  <text class="s" x="525" y="92" text-anchor="middle">every file hashed (SHA-256)</text>
+  <text class="s" x="525" y="110" text-anchor="middle">archive + SQLite, dedup'd</text>
+
+  <rect class="box hot" x="650" y="40" width="170" height="90" rx="10"/>
+  <text class="t" x="735" y="70" text-anchor="middle">Analysis</text>
+  <text class="s" x="735" y="92" text-anchor="middle">tree-sitter → behavior signature</text>
+  <text class="s" x="735" y="110" text-anchor="middle">prettify · diff · 40 rules</text>
+
+  <!-- row 2 -->
+  <rect class="box hot" x="440" y="180" width="380" height="80" rx="10"/>
+  <text class="t" x="630" y="208" text-anchor="middle">Findings</text>
+  <text class="s" x="630" y="230" text-anchor="middle">"+host access &lt;all_urls&gt;, polls cdn.x every 5 min, runs remote code"</text>
+  <text class="s" x="630" y="248" text-anchor="middle">severity · file:line · plain-English explanation</text>
+
+  <rect class="box" x="20" y="180" width="380" height="80" rx="10"/>
+  <text class="t" x="210" y="208" text-anchor="middle">Tray notification · window · CLI / JSON · HTML report</text>
+  <text class="s" x="210" y="230" text-anchor="middle">Disable (companion) · Quarantine · Export version · Web Store page</text>
+  <text class="s" x="210" y="248" text-anchor="middle">nothing leaves the machine</text>
+
+  <!-- arrows -->
+  <path class="a" d="M190,85 L228,85"/>
+  <path class="a" d="M400,85 L438,85"/>
+  <path class="a" d="M610,85 L648,85"/>
+  <path class="a" d="M735,130 L735,178"/>
+  <path class="a" d="M440,220 L402,220"/>
+  <text class="s" x="860" y="88">on every</text>
+  <text class="s" x="860" y="104">new version</text>
+</svg>

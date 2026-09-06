@@ -1,15 +1,72 @@
-# ExtWatch
+<div align="center">
+  <img src="docs/images/logo.png" alt="ExtWatch logo" width="110">
+  <h1>ExtWatch</h1>
+  <p>
+    <strong>Your browser extensions update themselves at night. ExtWatch reads the diff so you don't have to.</strong>
+  </p>
+  <p>
+    <a href="#why-extwatch">Why</a> &middot;
+    <a href="#how-it-works">How it works</a> &middot;
+    <a href="#what-it-catches">What it catches</a> &middot;
+    <a href="#quick-start">Quick start</a> &middot;
+    <a href="#security-model">Security</a>
+  </p>
+</div>
 
-**A local watchdog that diffs your browser extensions on every silent update.**
+---
 
-ExtWatch is a small tray app (macOS, Windows, Linux) that snapshots every extension installed in
-Chrome, Chromium, Edge and Brave, across all profiles. When an extension updates in the background,
-ExtWatch catches the new version, archives it, prettifies the code, diffs it against the previous
-version and tells you what actually changed: new host access, new permissions, new domains it talks
-to, header stripping, and the loader patterns used by extensions that turned malicious after being
-sold (fetch JavaScript on a timer, cache it in storage, run it through an `onload` attribute).
+## Why ExtWatch?
 
-Nothing leaves your machine. There is no account, no server, no telemetry.
+An extension you installed years ago is not the extension running today. Extensions get sold,
+developer accounts get phished, and the next silent update turns a screenshot tool into
+spyware. QuickLens did exactly that in 2026: kept its features, added a five-minute poll to a
+server for JavaScript to run on every page. The Great Suspender, Nano Adblocker, Stylish and the
+35 extensions of the Cyberhaven wave went the same way. The browser shows nothing, because
+nothing about the update looks wrong to the browser.
+
+ExtWatch is a small tray app for macOS, Windows and Linux that watches what your extensions
+actually do, version after version, on your own machine.
+
+- **Sees every install** - Chrome, Chromium, Edge, Brave, Vivaldi, Opera and Arc, every profile,
+  read straight from the browser's own files.
+- **Keeps every version** - content-addressed archive, so a hundred versions of a 5 MB extension
+  cost a few MB. Export any of them as a zip.
+- **Catches silent updates in seconds** - a file watcher per profile, plus rescans on start and
+  every 15 minutes. Versions that are downloaded but not yet running are reported first.
+- **Explains the change** - the code is parsed, reduced to a behavior signature, and diffed against
+  the previous version. Forty rules turn the difference into findings a normal person can read.
+- **Shows the code** - side by side, prettified, highlighted, with each finding linked to its line.
+- **Lets you act** - one-click Disable, quarantine, export, share a report.
+- **Local only** - no account, no server, no telemetry. The one optional network feature is off
+  by default.
+
+## How It Works
+
+<div align="center">
+  <img src="docs/images/architecture.svg" alt="ExtWatch architecture" width="900">
+</div>
+
+1. **Discover** - find every user data directory and profile, list the extensions and read
+   `Secure Preferences` for the active version and enabled state.
+2. **Snapshot** - hash every file, store new blobs in the archive, record the version and its
+   manifest in SQLite. The first snapshot of an extension is its baseline.
+3. **Watch** - a file-system watcher on each profile notices the new `Extensions/<id>/<version>/`
+   directory the moment the browser writes it.
+4. **Analyze** - both versions are parsed with tree-sitter: domains it talks to, `chrome.*` APIs,
+   code run from strings, storage read next to `eval`, header-stripping rules, keystroke listeners,
+   fingerprinting reads, obfuscation.
+5. **Explain** - the rules compare the two signatures and produce findings with a severity, a
+   sentence, and a `file:line`.
+6. **Show** - a tray notification with the one-line summary, and a window with the findings, the
+   manifest diff and the code diff.
+
+## What It Catches
+
+<div align="center">
+  <img src="docs/images/changes.png" alt="A silent update caught by ExtWatch" width="900">
+</div>
+
+The notification for the update above reads:
 
 ```
 Screenshot Tool 1.1.0 → 1.2.0
@@ -17,149 +74,170 @@ Screenshot Tool 1.1.0 → 1.2.0
 executes code through an event-handler attribute
 ```
 
-## What it does
+The malicious payload is never in the package, so the rules look for the loader instead:
 
-- **Finds every install.** Chrome (stable/beta/dev/canary), Chromium, Edge, Brave, Vivaldi, Opera
-  and Arc user data directories, every profile, including unpacked developer extensions. Reads the
-  browser's own preferences for enabled state, install source and the active version.
-- **Archives every version.** Files are stored content-addressed (SHA-256), so a hundred versions of
-  a 5 MB extension cost a few MB. Export any version as a zip to load unpacked, or keep it as evidence.
-- **Catches silent updates.** A file-system watcher on each profile plus periodic and startup rescans;
-  a version that was downloaded but not yet activated is reported before it runs.
-- **Explains the change.** A semantic manifest diff and a behavior signature extracted from the code
-  with tree-sitter: network domains, `chrome.*` APIs, `eval`/`new Function`/timer-string execution,
-  `setAttribute('onload', …)`, `importScripts`, storage-to-exec chains, `declarativeNetRequest`
-  rules that strip `Content-Security-Policy` or `X-Frame-Options`, keystroke listeners in content
-  scripts, fingerprinting reads, obfuscation indicators. Forty rules turn the delta into findings
-  with a severity and a plain-English explanation. Each finding links to a line of the prettified code.
-- **Shows the diff.** Side-by-side, prettified, syntax-highlighted, with change navigation.
-  Minified 20k-line bundles are formatted deterministically so only real changes show.
-- **Lets you act.** One-click **Disable** through the companion extension (below), open the Web
-  Store listing, copy the `chrome://extensions` URL, export the version, export a self-contained
-  HTML report to share, or quarantine the installed files so the browser disables the extension
-  (reversible).
-- **Watches the publisher (opt-in).** Once a day it can read the Web Store listing of each
-  store-installed extension and raise a High finding when "Offered by" changes or the listing
-  disappears. Off by default; it is the only network access ExtWatch ever makes.
-- **Works headless.** `extwatch scan --json`, `extwatch analyze <dir|zip|crx>` and
-  `extwatch diff` return machine-readable output and exit code 3 on a High finding, for CI and blog posts.
+- a timer plus a network call to a new domain in the same file
+- `chrome.storage` reads next to `eval`, `new Function` or a string timer
+- an `on*` attribute set from a variable, the QuickLens trick
+- `declarativeNetRequest` rules or `webRequest` listeners that strip `Content-Security-Policy`
+  or `X-Frame-Options` from every page
+- new `<all_urls>` access, new sensitive permissions, widened `externally_connectable`
+- a changed signing key or update URL, keystroke listeners in content scripts, obfuscation
 
-## Install
+Every finding opens the code at the exact line, prettified so a 20,000-line minified bundle
+diffs like source:
 
-Release builds are produced by `.github/workflows/release.yml` on every `v*` tag: a macOS `.dmg`
-(signed and notarized when the repository secrets are set), a Windows installer and portable zip,
-and a Linux AppImage. The same scripts run locally:
+<div align="center">
+  <img src="docs/images/code-diff.png" alt="Side-by-side code diff" width="900">
+</div>
+
+## Tech Stack
+
+| Layer     | Technology                                                    |
+| --------- | ------------------------------------------------------------- |
+| App       | C++20, Qt 6 Widgets (tray, window, diff viewer)               |
+| Analysis  | tree-sitter + tree-sitter-javascript, custom structural formatter |
+| Diff      | dtl (Myers)                                                   |
+| Storage   | SQLite via Qt SQL, content-addressed blob store               |
+| Packages  | miniz (zip, CRX2/CRX3)                                        |
+| Companion | Manifest V3 extension, native messaging                        |
+| Build     | CMake, Ninja, GitHub Actions (macOS, Windows, Linux)           |
+
+## Security Model
+
+ExtWatch is a read-only observer of your browser's files. It never writes to browser
+preferences and never sends data anywhere.
+
+### Protected Today
+
+- **Everything is local** - the archive, the database and the reports live in your user data
+  directory. The only network access, Web Store publisher tracking, is opt-in.
+- **Tamper check** - Chrome writes the signing key into every unpacked `manifest.json`; ExtWatch
+  verifies that it derives to the extension ID.
+- **Reproducible findings** - every version has a tree hash and every report names the rules
+  version, so two machines with the same files get the same result.
+- **Small companion** - the optional extension has only `management` and `nativeMessaging`
+  permissions, no page access, no network, about 150 lines you can read in a minute.
+
+### Known Limits
+
+| Limit                | Details                                                                                                                       |
+| -------------------- | ----------------------------------------------------------------------------------------------------------------------------- |
+| Static analysis      | ExtWatch reads code, it does not run it. Heavily obfuscated loaders can hide; the obfuscation itself is flagged.               |
+| Disable needs help   | Browsers refuse `chrome://` links from other apps and protect their preferences, so one-click Disable goes through the companion extension. Without it, Quarantine moves the files so the browser refuses to run them. |
+| Unsigned builds      | Until certificates are added, Gatekeeper and SmartScreen warn once. Signing and notarization are wired into the release workflow. |
+| First scan cost      | The first run analyzes every extension once. With a 44 MB wallet extension installed that takes about 40 seconds in the background; later scans take about a second. |
+
+## Quick Start
 
 ```bash
-packaging/macos/build-dmg.sh            # ExtWatch.app + dist/ExtWatch-<version>-macos.dmg
-packaging/linux/build-appimage.sh       # dist/ExtWatch-<version>-x86_64.AppImage
-packaging/linux/docker-build.sh         # build + tests + AppImage inside Debian trixie
-powershell packaging/windows/build-installer.ps1   # Inno Setup installer + portable zip
-```
-
-A dmg built against Homebrew's Qt is for local testing only (Homebrew's Qt frameworks target the
-newest macOS); release dmgs come from the workflow, which uses the official Qt installer.
-Unsigned builds work but macOS Gatekeeper and Windows SmartScreen will warn; see the scripts for
-the `CODESIGN_IDENTITY`, `NOTARY_PROFILE` and `SIGNTOOL_CERT_THUMBPRINT` variables. For the
-command line on macOS: `ln -s /Applications/ExtWatch.app/Contents/MacOS/ExtWatch /usr/local/bin/extwatch`.
-
-To build from source:
-
-Requirements: CMake 3.24+, Ninja, a C++20 compiler, Qt 6.5+ (Core, Gui, Widgets, Sql, Concurrent, Network, Svg, Test).
-tree-sitter, its JavaScript grammar and dtl are fetched at configure time; miniz is vendored.
-
-```bash
-cmake --preset dev-mac      # or dev-linux; see CMakePresets.json for CI presets
+git clone https://github.com/kanishka0411/extWatch.git
+cd extWatch
+cmake --preset dev-mac          # dev-linux on Linux, ci-windows on Windows
 cmake --build --preset dev-mac
 ctest --preset dev-mac
+./build/dev-mac/src/extwatch --show
 ```
 
-macOS: `brew install qt cmake ninja`. Linux: your distribution's Qt 6 development packages.
-Windows: the Qt online installer with MSVC 2022, then the `ci-windows` preset.
+Requirements: CMake 3.24+, Ninja, a C++20 compiler and Qt 6.5+ (Core, Gui, Widgets, Sql,
+Concurrent, Network, Svg, Test). On a Mac, `brew install qt cmake ninja` covers it. tree-sitter,
+its JavaScript grammar and dtl are fetched at configure time; miniz is vendored.
 
-## Use
+### See it catch something
 
-Start `extwatch` without arguments for the tray app. The first scan records every extension as a
-baseline and shows its risk profile; from then on you are notified about changes only.
-
-```bash
-extwatch scan                      # inventory of every profile, archives new versions, prints events
-extwatch scan --json               # the same, machine-readable (manifest facts and findings included)
-extwatch history <extension-id>    # archived versions and events for one extension
-extwatch events                    # recent events across all extensions
-extwatch diff <id> <vA> <vB>       # findings, manifest and code diff between two archived versions
-extwatch diff <id> <vA> <vB> --html report.html
-extwatch report <event-id> --html report.html
-extwatch analyze <dir|zip|crx>     # behavior signature and risk profile of any extension package
-extwatch export <id> <version> out.zip
-extwatch rules                     # the rules behind the findings
-extwatch store <extension-id>      # Web Store listing: publisher, version, rating (uses the network)
-extwatch paths                     # where ExtWatch looks for browsers on this machine
-```
-
-Troubleshooting: `EXTWATCH_DEBUG=1` makes the tray app log watcher activity and rescans to stderr.
-
-Data lives in the per-user data directory (macOS `~/Library/Application Support/ExtWatch`, Linux
-`~/.local/share/extwatch`, Windows `%LOCALAPPDATA%\ExtWatch`), overridable with `EXTWATCH_DATA_DIR`
-or `--data-dir`. Unusual browser locations: `EXTWATCH_USER_DATA_DIRS="chrome=/path/User Data;brave=/other"`
-or the Settings dialog.
-
-## One-click Disable: the companion extension
-
-Browsers refuse `chrome://` links from other programs and protect their preference files, so a
-desktop app cannot flip an extension off by itself. ExtWatch ships a companion extension
-(`companion/`, about 150 lines, `management` and `nativeMessaging` permissions only, no network,
-no page access) that gives the app a real **Disable** button and instant install/update events.
-
-Setup takes a minute: **Settings → Set up companion extension** registers the native messaging
-host for every browser on the machine (user level, no admin) and opens the folder to load
-unpacked from `chrome://extensions` with Developer mode on. Monitoring keeps running outside the
-browser; only the switch lives inside it. Without the companion, **Quarantine** remains available.
-
-## Try the demo
-
-The repository ships a fixture extension in three versions: 1.0.0 and 1.1.0 are benign, 1.2.0 is a
-faithful re-creation of the QuickLens pattern (all hosts, CSP stripping, a five-minute poller and an
-`onload` executor, pointing at reserved `.invalid` hosts so nothing ever connects).
+The repo ships a fixture extension in three versions. 1.0.0 and 1.1.0 are harmless; 1.2.0 is a
+faithful copy of the QuickLens loader, pointed at `.invalid` domains so it can never connect.
 
 ```bash
 tools/make_fixture_profile.py fixtures/generated/user-data --version 1.1.0
 export EXTWATCH_DATA_DIR=$PWD/fixtures/generated/data
 export EXTWATCH_USER_DATA_DIRS="chrome=$PWD/fixtures/generated/user-data" EXTWATCH_USER_DATA_DIRS_ONLY=1
-./build/dev-mac/src/extwatch                                        # tray app records the baseline
-tools/make_fixture_profile.py fixtures/generated/user-data --update 1.2.0   # the silent update lands
+./build/dev-mac/src/extwatch --show
 ```
 
-Within a few seconds the tray reports the update with its findings; click it to see the diff.
+In a second terminal, let the update land, then watch the notification:
 
-## How the hard parts work
+```bash
+tools/make_fixture_profile.py fixtures/generated/user-data --update 1.2.0
+```
 
-- **Where extensions live.** `<User Data>/<Profile>/Extensions/<id>/<version>_<n>/`. Chrome writes the
-  signing key into the unpacked `manifest.json`, so ExtWatch verifies that the key derives to the
-  extension ID. Enabled state and the active version come from `Secure Preferences`, which is
-  HMAC-protected on macOS and Windows and therefore never written.
-- **Readable diffs of minified code.** A structural formatter driven by the tree-sitter syntax tree
-  (one statement per line, blocks indented, long literals broken) is deterministic, so two formatted
-  versions diff cleanly. Analysis runs on the original bytes and maps offsets to formatted lines.
-- **The QuickLens trick.** The malicious payload is never in the package, so the rules flag the
-  loader instead: a timer plus a network call to a new domain in the same file, storage reads next to
-  string execution, `on*` attributes set from variables, and header-stripping rules.
-- **Disable.** Browsers reject `chrome://` URLs from other programs and protect their preferences, so
-  the one-click path is the companion extension over native messaging; the fallbacks are copying the
-  extensions-page URL and quarantining the files so the browser disables the extension as corrupted.
-- **Publisher tracking.** The Web Store has no API. The listing page is server-rendered with stable
-  labels ("Offered by", "Version", "Updated"), which the parser keys on; unknown IDs redirect to the
-  store front page, which is treated as "listing gone".
+### Packages
 
-The full plan, decisions and roadmap are in [docs/PLAN.md](docs/PLAN.md).
+Every `v*` tag builds a macOS dmg, a Windows installer plus portable zip and a Linux AppImage on
+GitHub Actions and attaches them to the release. The same scripts run locally:
 
-## Prior art
+```bash
+packaging/macos/build-dmg.sh
+packaging/linux/build-appimage.sh
+packaging/linux/docker-build.sh                    # build, test and package inside Debian trixie
+powershell packaging/windows/build-installer.ps1
+```
 
-[ading2210/ext-watcher](https://github.com/ading2210/ext-watcher) watches the Web Store for extension
-IDs you list and posts diffs to Discord. crx-analyzer analyzes one package at a time. Chrome itself
-re-prompts on permission increases but shows no code. ExtWatch watches what is actually installed on
-your machine, across browsers and profiles, keeps every version, and explains the code change.
+## Command Line
+
+Everything the window does, for scripts and CI. `--json` everywhere; exit code 3 when a finding
+is High.
+
+| Command                                | What it does                                              |
+| -------------------------------------- | --------------------------------------------------------- |
+| `extwatch scan`                        | Inventory every profile, archive new versions, print events |
+| `extwatch history <id>`                | Versions and events recorded for one extension            |
+| `extwatch events`                      | Recent events across all extensions                       |
+| `extwatch diff <id> <old> <new>`       | Findings, manifest and code diff between two versions     |
+| `extwatch report <event-id> --html f`  | Self-contained HTML report for one event                  |
+| `extwatch analyze <dir\|zip\|crx>`      | Risk profile of any package, nothing installed            |
+| `extwatch export <id> <version> out.zip` | Restore an archived version                             |
+| `extwatch store <id>`                  | Who offers it on the Web Store right now                  |
+| `extwatch rules`                       | The forty rules and their explanations                    |
+| `extwatch paths`                       | Where it looks for browsers on this machine               |
+
+Data lives in `~/Library/Application Support/ExtWatch` (macOS), `~/.local/share/extwatch`
+(Linux) or `%LOCALAPPDATA%\ExtWatch` (Windows). Browsers in unusual places:
+`EXTWATCH_USER_DATA_DIRS="chrome=/path/User Data;brave=/other"`. `EXTWATCH_DEBUG=1` logs what
+the watcher sees.
+
+## Companion Extension
+
+A desktop app cannot switch an extension off by itself, so ExtWatch ships a companion. It lives
+in `companion/`, connects to ExtWatch through native messaging, and does one thing: enable or
+disable an extension when you press the button. It also reports installs and updates instantly.
+
+Settings → **Set up companion extension** registers the native messaging host for every browser
+on the machine (no admin) and opens the folder. Load it unpacked from `chrome://extensions` with
+Developer mode on. Monitoring stays outside the browser; only the switch lives inside it.
+
+## Roadmap
+
+### V1
+
+- [x] Discovery across Chrome-family browsers and profiles
+- [x] Content-addressed archive and event history
+- [x] File-system watcher with startup and periodic rescans
+- [x] Behavior signatures, forty rules, prettified side-by-side diff
+- [x] Tray app, window, HTML reports, CLI with JSON
+- [x] Companion extension for one-click Disable
+- [x] Opt-in Web Store publisher tracking
+- [x] macOS dmg, Windows installer, Linux AppImage, CI on all three
+- [ ] Signed and notarized releases
+- [ ] Companion published on the Web Store
+
+### Later
+
+- [ ] Firefox (`extensions.json`, XPI archives)
+- [ ] Web Store signature verification from `_metadata/verified_contents.json`
+- [ ] Team mode that merges `scan --json` from many machines
+- [ ] Public behavior-signature dataset from a 30-day watch of popular extensions
+
+The full plan and the decisions behind it are in [docs/PLAN.md](docs/PLAN.md); the signature
+format is in [docs/signature-schema.md](docs/signature-schema.md).
+
+## Related Work
+
+[ext-watcher](https://github.com/ading2210/ext-watcher) watches the Web Store for IDs you list
+and posts diffs to Discord. crx-analyzer looks at one package at a time. Chrome re-prompts when an
+extension asks for more permissions but never shows you the code. None of them look at what is
+actually installed on your machine, version after version, and explain the change.
 
 ## License
 
-MIT. Qt is used under the LGPLv3 with dynamic linking. tree-sitter (MIT), dtl (BSD), miniz (MIT).
+MIT. Qt under the LGPLv3 with dynamic linking; tree-sitter (MIT), dtl (BSD), miniz (MIT).
