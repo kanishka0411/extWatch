@@ -13,13 +13,17 @@
 
 #include <QFile>
 #include <QJsonArray>
+#include <QSet>
 
 #include "core/analyzer.h"
 #include "core/blobstore.h"
 #include "core/browserkind.h"
+#include "core/companion.h"
 #include "core/crxid.h"
 #include "core/package.h"
 #include "core/rules.h"
+#include "core/hashing.h"
+#include "core/jsonutil.h"
 #include "core/signature.h"
 #include "core/storemeta.h"
 #include "core/textdiff.h"
@@ -36,7 +40,8 @@ const QStringList kCommands = {
     QStringLiteral("scan"),    QStringLiteral("history"), QStringLiteral("paths"),
     QStringLiteral("events"),  QStringLiteral("analyze"), QStringLiteral("diff"),
     QStringLiteral("report"),  QStringLiteral("export"),  QStringLiteral("rules"),
-    QStringLiteral("store"),   QStringLiteral("help"),    QStringLiteral("version"),
+    QStringLiteral("store"),   QStringLiteral("doctor"),  QStringLiteral("help"),
+    QStringLiteral("version"),
 };
 
 QTextStream& out() {
@@ -65,6 +70,10 @@ QString usage() {
         "  export <id> <version> <out> Restore an archived version to a directory or .zip\n"
         "  rules                      List the rules behind the findings\n"
         "  store <id>                 Fetch the Web Store listing (publisher, version); uses the network\n"
+        "  doctor [--verify-blobs]    Check the database, the archive and the companion for problems\n"
+        "\n"
+        "Versions can be addressed as 1.2.0, 1.2.0@<tree hash prefix> or @<tree hash prefix> when the\n"
+        "same version string was archived more than once.\n"
         "  paths                      Where ExtWatch looks for browsers on this machine\n"
         "  version                    Print the version\n"
         "\n"
@@ -118,6 +127,7 @@ struct CommonOptions {
     bool analyze = true;
     QString html;
     bool full = false;
+    bool verifyBlobs = false;
 };
 
 bool parseCommon(QCommandLineParser& parser, const QStringList& args, CommonOptions& opts,
@@ -134,6 +144,7 @@ bool parseCommon(QCommandLineParser& parser, const QStringList& args, CommonOpti
         {QStringLiteral("no-analyze"), QStringLiteral("Skip analysis")},
         {QStringLiteral("html"), QStringLiteral("Write HTML report"), QStringLiteral("file")},
         {QStringLiteral("full"), QStringLiteral("Uncapped diff output")},
+        {QStringLiteral("verify-blobs"), QStringLiteral("Re-hash every archived blob")},
     });
     parser.addPositionalArgument(QStringLiteral("command"), QString());
     parser.addPositionalArgument(QStringLiteral("args"), QString(), QStringLiteral("[args...]"));
@@ -161,7 +172,28 @@ bool parseCommon(QCommandLineParser& parser, const QStringList& args, CommonOpti
     opts.analyze = !parser.isSet(QStringLiteral("no-analyze"));
     opts.html = parser.value(QStringLiteral("html"));
     opts.full = parser.isSet(QStringLiteral("full"));
+    opts.verifyBlobs = parser.isSet(QStringLiteral("verify-blobs"));
     return true;
+}
+
+// Resolves "1.2.0", "1.2.0@abc123" or "@abc123" against the archived versions of one extension.
+// A bare version string that was archived more than once resolves to the newest snapshot.
+std::optional<VersionRow> resolveVersionRef(Database& db, qint64 extensionRowId, const QString& ref, QString* note) {
+    const QString version = ref.section(u'@', 0, 0);
+    const QString hashPrefix = ref.contains(u'@') ? ref.section(u'@', 1).toLower() : QString();
+    std::optional<VersionRow> found;
+    int matches = 0;
+    for (const VersionRow& v : db.versionsForExtension(extensionRowId)) {
+        if (!version.isEmpty() && v.version != version) continue;
+        if (!hashPrefix.isEmpty() && !v.treeHash.startsWith(hashPrefix)) continue;
+        matches++;
+        found = v;  // versionsForExtension is ordered oldest first: keep the newest
+    }
+    if (matches > 1 && hashPrefix.isEmpty() && note) {
+        *note = QStringLiteral("%1 snapshots carry version %2; using the newest (%3). Address one with %2@<tree hash>.")
+                    .arg(matches).arg(version, found->treeHash.left(12));
+    }
+    return found;
 }
 
 ScanOptions toScanOptions(const CommonOptions& c) {
@@ -360,9 +392,9 @@ int cmdHistory(const CommonOptions& c, const QStringList& positional) {
         out() << "  versions:\n";
         for (const VersionRow& v : versions) {
             const bool current = ext.currentVersionId && *ext.currentVersionId == v.id;
-            out() << "    " << (current ? "* " : "  ") << pad(v.version, 14)
+            out() << "    " << (current ? "* " : "  ") << pad(v.version + QStringLiteral("@") + v.treeHash.left(8), 24)
                   << "first seen " << fmtTime(v.firstSeen) << "  " << v.fileCount << " files, "
-                  << v.bytes / 1024 << " KiB  " << v.treeHash.left(12) << "\n";
+                  << v.bytes / 1024 << " KiB\n";
         }
         out() << "  events:\n";
         for (const EventRow& e : events) {
@@ -509,7 +541,12 @@ int cmdAnalyze(const CommonOptions& c, const QStringList& positional) {
         return 2;
     }
     QString error;
-    const QList<SourceFile> files = loadSourcesFromPackage(positional.at(1), &error);
+    QStringList packageWarnings;
+    const QList<SourceFile> files = loadSourcesFromPackage(positional.at(1), &error, &packageWarnings);
+    for (const QString& w : packageWarnings) {
+        err() << "warning: " << w << "\n";
+    }
+    err().flush();
     if (files.isEmpty()) {
         err() << "cannot read package: " << (error.isEmpty() ? QStringLiteral("no files") : error) << "\n";
         return 1;
@@ -703,16 +740,17 @@ int cmdDiff(const CommonOptions& c, const QStringList& positional) {
                 continue;
             }
         }
-        std::optional<qint64> a;
-        std::optional<qint64> b;
-        for (const VersionRow& v : db.versionsForExtension(ext.id)) {
-            if (v.version == vA && !a) a = v.id;
-            if (v.version == vB && !b) b = v.id;
-        }
-        if (!b || (!a && vA != QStringLiteral("none"))) {
+        QString note;
+        const std::optional<VersionRow> rowA = vA == QStringLiteral("none") ? std::nullopt : resolveVersionRef(db, ext.id, vA, &note);
+        const std::optional<VersionRow> rowB = resolveVersionRef(db, ext.id, vB, &note);
+        if (!rowB || (!rowA && vA != QStringLiteral("none"))) {
             continue;
         }
-        const std::optional<ChangeReport> r = buildVersionReport(db, blobs, a, *b);
+        if (!note.isEmpty()) {
+            err() << "note: " << note << "\n";
+            err().flush();
+        }
+        const std::optional<ChangeReport> r = buildVersionReport(db, blobs, rowA ? std::optional<qint64>(rowA->id) : std::nullopt, rowB->id);
         if (!r) {
             continue;
         }
@@ -753,10 +791,16 @@ int cmdExport(const CommonOptions& c, const QStringList& positional) {
     }
     const BlobStore blobs(dataDir);
     for (const ExtensionRow& ext : db.extensionsByExtId(positional.at(1))) {
-        for (const VersionRow& v : db.versionsForExtension(ext.id)) {
-            if (v.version != positional.at(2)) {
-                continue;
-            }
+        QString note;
+        const std::optional<VersionRow> resolved = resolveVersionRef(db, ext.id, positional.at(2), &note);
+        if (!resolved) {
+            continue;
+        }
+        if (!note.isEmpty()) {
+            err() << "note: " << note << "\n";
+        }
+        {
+            const VersionRow& v = *resolved;
             const QString target = positional.at(3);
             QString error;
             bool ok = false;
@@ -769,7 +813,7 @@ int cmdExport(const CommonOptions& c, const QStringList& positional) {
                 err() << "export failed: " << error << "\n";
                 return 1;
             }
-            out() << "exported " << ext.name << " " << v.version << " (" << v.fileCount << " files) to " << target << "\n";
+            out() << "exported " << ext.name << " " << v.version << "@" << v.treeHash.left(12) << " (" << v.fileCount << " files) to " << target << "\n";
             out() << "To run it: disable the store copy, open chrome://extensions, enable Developer mode, Load unpacked.\n";
             out().flush();
             return 0;
@@ -777,6 +821,100 @@ int cmdExport(const CommonOptions& c, const QStringList& positional) {
     }
     err() << "no archived version " << positional.at(2) << " for " << positional.at(1) << "\n";
     return 1;
+}
+
+int cmdDoctor(const CommonOptions& c) {
+    Database db;
+    QString dataDir;
+    if (!openStore(c, db, dataDir)) {
+        return 1;
+    }
+    const BlobStore blobs(dataDir);
+    QStringList problems;
+    QJsonObject report;
+    report.insert(QStringLiteral("data_dir"), dataDir);
+    report.insert(QStringLiteral("schema_version"), db.schemaVersion());
+
+    QString check;
+    const bool dbOk = db.quickCheck(&check);
+    report.insert(QStringLiteral("sqlite_quick_check"), check);
+    if (!dbOk) problems.append(QStringLiteral("SQLite quick_check: %1").arg(check));
+
+    int versions = 0, filesChecked = 0, missingBlobs = 0, badBlobs = 0, countMismatch = 0;
+    QSet<QString> referenced;
+    for (const VersionRow& v : db.allVersions()) {
+        versions++;
+        const QList<FileEntry> files = db.filesForVersion(v.id);
+        if (files.size() != v.fileCount) {
+            countMismatch++;
+            problems.append(QStringLiteral("snapshot %1 (%2) records %3 files but has %4 rows").arg(v.id).arg(v.version).arg(v.fileCount).arg(files.size()));
+        }
+        for (const FileEntry& f : files) {
+            filesChecked++;
+            referenced.insert(toHex(f.sha256));
+            if (!blobs.has(f.sha256)) {
+                missingBlobs++;
+                if (missingBlobs <= 5) problems.append(QStringLiteral("missing blob for %1 in snapshot %2").arg(f.relPath).arg(v.id));
+            } else if (c.verifyBlobs && !blobs.verify(f.sha256)) {
+                badBlobs++;
+                problems.append(QStringLiteral("blob content does not match its hash: %1 (%2)").arg(toHex(f.sha256).left(12), f.relPath));
+            }
+        }
+    }
+    int orphans = 0;
+    for (const QByteArray& sha : blobs.allBlobs()) {
+        if (!referenced.contains(toHex(sha))) orphans++;
+    }
+    report.insert(QStringLiteral("snapshots"), versions);
+    report.insert(QStringLiteral("file_rows"), filesChecked);
+    report.insert(QStringLiteral("missing_blobs"), missingBlobs);
+    report.insert(QStringLiteral("bad_blobs"), badBlobs);
+    report.insert(QStringLiteral("orphan_blobs"), orphans);
+    report.insert(QStringLiteral("blobs_verified"), c.verifyBlobs);
+
+    const int unanalyzed = static_cast<int>(db.unanalyzedEvents(1000).size());
+    report.insert(QStringLiteral("events_without_findings"), unanalyzed);
+    if (unanalyzed > 0) problems.append(QStringLiteral("%1 event(s) have no findings yet; the next scan analyzes them").arg(unanalyzed));
+
+    int quarantineIssues = 0;
+    for (const QuarantineRow& q : db.allQuarantines()) {
+        if (q.state != QStringLiteral("restored") && !QFileInfo(q.quarantinePath).isDir()) {
+            quarantineIssues++;
+            problems.append(QStringLiteral("quarantine %1 (%2) is missing on disk").arg(q.id.left(8), q.extId));
+        }
+    }
+    report.insert(QStringLiteral("quarantine_issues"), quarantineIssues);
+
+    if (companionExtracted(dataDir)) {
+        const bool intact = companionExtractedHash(dataDir) == companionEmbeddedHash();
+        report.insert(QStringLiteral("companion_intact"), intact);
+        if (!intact) problems.append(QStringLiteral("the extracted companion extension differs from the embedded one"));
+    }
+#ifndef Q_OS_WIN
+    const QFileDevice::Permissions perms = QFileInfo(dataDir).permissions();
+    const bool privateDir = !(perms & (QFileDevice::ReadGroup | QFileDevice::ReadOther));
+    report.insert(QStringLiteral("data_dir_private"), privateDir);
+    if (!privateDir) problems.append(QStringLiteral("data directory is readable by other users: chmod 700 \"%1\"").arg(dataDir));
+#endif
+    report.insert(QStringLiteral("problems"), fromStringList(problems));
+    if (c.json) {
+        printJson(report, c.compact);
+        return problems.isEmpty() ? 0 : 1;
+    }
+    out() << "archive:        " << dataDir << "\n"
+          << "schema:         " << db.schemaVersion() << "\n"
+          << "sqlite:         " << check << "\n"
+          << "snapshots:      " << versions << " (" << filesChecked << " file rows, " << countMismatch << " count mismatches)\n"
+          << "blobs:          " << missingBlobs << " missing, " << badBlobs << " corrupt" << (c.verifyBlobs ? QString() : QStringLiteral(" (not verified; add --verify-blobs)")) << ", " << orphans << " orphaned\n"
+          << "events:         " << unanalyzed << " without findings\n";
+    if (problems.isEmpty()) {
+        out() << "\nno problems found\n";
+    } else {
+        out() << "\nproblems:\n";
+        for (const QString& p : problems) out() << "  - " << p << "\n";
+    }
+    out().flush();
+    return problems.isEmpty() ? 0 : 1;
 }
 
 int cmdStore(const CommonOptions& c, const QStringList& positional) {
@@ -897,6 +1035,9 @@ int run(const QStringList& args) {
     }
     if (command == QStringLiteral("store")) {
         return cmdStore(common, positional);
+    }
+    if (command == QStringLiteral("doctor")) {
+        return cmdDoctor(common);
     }
     err() << "unknown command: " << command << "\n\n" << usage();
     err().flush();
