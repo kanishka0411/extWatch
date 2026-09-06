@@ -1,0 +1,77 @@
+{
+  "version": 6,
+  "cmakeMinimumRequired": { "major": 3, "minor": 24, "patch": 0 },
+  "configurePresets": [
+    {
+      "name": "base",
+      "hidden": true,
+      "generator": "Ninja",
+      "binaryDir": "${sourceDir}/build/${presetName}",
+      "cacheVariables": { "CMAKE_EXPORT_COMPILE_COMMANDS": "ON" }
+    },
+    {
+      "name": "dev-mac",
+      "displayName": "Dev (macOS, Homebrew Qt, Debug)",
+      "inherits": "base",
+      "cacheVariables": {
+        "CMAKE_BUILD_TYPE": "Debug",
+        "CMAKE_PREFIX_PATH": "/opt/homebrew/opt/qt"
+      }
+    },
+    {
+      "name": "dev-linux",
+      "displayName": "Dev (Linux, system Qt, Debug)",
+      "inherits": "base",
+      "cacheVariables": { "CMAKE_BUILD_TYPE": "Debug" }
+    },
+    {
+      "name": "ci-macos",
+      "inherits": "base",
+      "cacheVariables": { "CMAKE_BUILD_TYPE": "Release", "EXTWATCH_MACOS_BUNDLE": "OFF" }
+    },
+    {
+      "name": "ci-linux",
+      "inherits": "base",
+      "cacheVariables": { "CMAKE_BUILD_TYPE": "Release" }
+    },
+    {
+      "name": "release-mac",
+      "displayName": "Release (macOS app bundle)",
+      "inherits": "base",
+      "cacheVariables": {
+        "CMAKE_BUILD_TYPE": "Release",
+        "CMAKE_PREFIX_PATH": "/opt/homebrew/opt/qt",
+        "EXTWATCH_MACOS_BUNDLE": "ON",
+        "EXTWATCH_BUILD_TESTS": "OFF"
+      }
+    },
+    {
+      "name": "release-linux",
+      "inherits": "base",
+      "cacheVariables": { "CMAKE_BUILD_TYPE": "Release", "EXTWATCH_BUILD_TESTS": "OFF", "CMAKE_INSTALL_PREFIX": "/usr" }
+    },
+    {
+      "name": "ci-windows",
+      "generator": "Visual Studio 17 2022",
+      "architecture": "x64",
+      "binaryDir": "${sourceDir}/build/${presetName}",
+      "cacheVariables": { "CMAKE_EXPORT_COMPILE_COMMANDS": "OFF" }
+    }
+  ],
+  "buildPresets": [
+    { "name": "dev-mac", "configurePreset": "dev-mac" },
+    { "name": "dev-linux", "configurePreset": "dev-linux" },
+    { "name": "ci-macos", "configurePreset": "ci-macos" },
+    { "name": "ci-linux", "configurePreset": "ci-linux" },
+    { "name": "ci-windows", "configurePreset": "ci-windows", "configuration": "Release" },
+    { "name": "release-mac", "configurePreset": "release-mac" },
+    { "name": "release-linux", "configurePreset": "release-linux" }
+  ],
+  "testPresets": [
+    { "name": "dev-mac", "configurePreset": "dev-mac", "output": { "outputOnFailure": true } },
+    { "name": "dev-linux", "configurePreset": "dev-linux", "output": { "outputOnFailure": true } },
+    { "name": "ci-macos", "configurePreset": "ci-macos", "output": { "outputOnFailure": true } },
+    { "name": "ci-linux", "configurePreset": "ci-linux", "output": { "outputOnFailure": true } },
+    { "name": "ci-windows", "configurePreset": "ci-windows", "configuration": "Release", "output": { "outputOnFailure": true } }
+  ]
+}

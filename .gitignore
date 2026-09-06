@@ -1,0 +1,25 @@
+# build output
+build/
+out/
+cmake-build-*/
+compile_commands.json
+.cache/
+
+# IDE
+.vscode/
+.idea/
+*.user
+*.swp
+.DS_Store
+
+# generated fixture profiles and local data
+fixtures/generated/
+*.sqlite
+*.sqlite-wal
+*.sqlite-shm
+
+# python
+__pycache__/
+
+# packaging output
+dist/
