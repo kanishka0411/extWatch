@@ -332,20 +332,34 @@ QList<Finding> compareSignatures(const Signature& before, const Signature& after
     const ManifestFacts& am = after.manifest;
 
     // --- code sink identity helper, used throughout
-    // A sink is new when the previous version had no sink of that kind in the same file, so a
-    // second eval appearing in a different file is not hidden by an existing one.
+    // A sink is new when the previous version has no matching sink left to pair it with. Sinks
+    // are paired by kind, file and evidence text, so a second eval added to a file that already
+    // had one is still reported, and a moved line is not.
     auto newSinksOfKinds = [&](const QStringList& kinds) {
         QList<Sink> found;
         for (const QString& k : kinds) {
+            QHash<QString, int> remaining;  // file\0evidence -> unmatched count in the old version
+            QHash<QString, int> remainingPerFile;
+            for (const Sink& b : before.sinksOfKind(k)) {
+                remaining[b.file + u'\0' + b.evidence]++;
+                remainingPerFile[b.file]++;
+            }
+            QList<Sink> unmatched;
             for (const Sink& s : after.sinksOfKind(k)) {
-                bool seen = false;
-                for (const Sink& b : before.sinksOfKind(k)) {
-                    if (b.file == s.file) {
-                        seen = true;
-                        break;
-                    }
+                const QString key = s.file + u'\0' + s.evidence;
+                if (remaining.value(key) > 0) {
+                    remaining[key]--;
+                    remainingPerFile[s.file]--;
+                } else {
+                    unmatched.append(s);
                 }
-                if (!seen) {
+            }
+            // Evidence text changes with an unrelated edit; an unmatched sink in a file that still
+            // has spare old sinks of the same kind is an edit, not an addition.
+            for (const Sink& s : unmatched) {
+                if (remainingPerFile.value(s.file) > 0) {
+                    remainingPerFile[s.file]--;
+                } else {
                     found.append(s);
                 }
             }
@@ -398,9 +412,12 @@ QList<Finding> compareSignatures(const Signature& before, const Signature& after
             if (cs.allFrames && !b->allFrames) changes.append(QStringLiteral("%1 now runs in all frames").arg(name));
             if (cs.runAt == QStringLiteral("document_start") && b->runAt != QStringLiteral("document_start")) changes.append(QStringLiteral("%1 now runs at document_start").arg(name));
             if (cs.matchOriginAsFallback && !b->matchOriginAsFallback) changes.append(QStringLiteral("%1 now also injects into about:/data:/blob: frames").arg(name));
+            if (cs.matchAboutBlank && !b->matchAboutBlank) changes.append(QStringLiteral("%1 now also injects into about:blank frames").arg(name));
             if (cs.world == QStringLiteral("MAIN") && b->world != QStringLiteral("MAIN")) mainWorld.append(name);
             const QStringList moreGlobs = newItems(b->includeGlobs, cs.includeGlobs);
             if (!moreGlobs.isEmpty()) changes.append(QStringLiteral("%1 matches more globs: %2").arg(name, joinLimited(moreGlobs, 3)));
+            const QStringList droppedExcludes = newItems(cs.excludeMatches, b->excludeMatches) + newItems(cs.excludeGlobs, b->excludeGlobs);
+            if (!droppedExcludes.isEmpty()) changes.append(QStringLiteral("%1 no longer excludes %2").arg(name, joinLimited(droppedExcludes, 3)));
         }
         if (!mainWorld.isEmpty()) {
             out.append(make("content_scripts.main_world", QStringLiteral("%1 %2 with world MAIN.").arg(joinLimited(mainWorld, 3), baseline ? QStringLiteral("runs") : QStringLiteral("now runs"))));
@@ -548,22 +565,25 @@ QList<Finding> compareSignatures(const Signature& before, const Signature& after
 
     // --- headers
     {
+        // Identity is header + operation + value + condition, so a rule that used to strip CSP on
+        // one site and now strips it everywhere, or sets a weaker value, counts as new.
         QSet<QString> beforeOps;
         for (const DnrHeaderMod& h : before.headerMods) {
-            beforeOps.insert(h.header + u'|' + h.operation);
+            beforeOps.insert(h.identity());
         }
         QStringList removed;
         QStringList rewritten;
         for (const DnrHeaderMod& h : after.headerMods) {
-            const QString key = h.header + u'|' + h.operation;
-            if (beforeOps.contains(key)) {
+            if (beforeOps.contains(h.identity())) {
                 continue;
             }
-            beforeOps.insert(key);
+            beforeOps.insert(h.identity());
+            const QString scope = h.condition.isEmpty() ? QStringLiteral("every request") : h.condition;
             if (h.operation == QStringLiteral("remove")) {
-                removed.append(h.header);
+                removed.append(QStringLiteral("%1 on %2").arg(h.header, scope));
             } else {
-                rewritten.append(QStringLiteral("%1 (%2)").arg(h.header, h.operation.isEmpty() ? QStringLiteral("modify") : h.operation));
+                rewritten.append(QStringLiteral("%1 %2 on %3%4").arg(h.header, h.operation.isEmpty() ? QStringLiteral("modify") : h.operation, scope,
+                                                                    h.value.isEmpty() ? QString() : QStringLiteral(" to \"%1\"").arg(h.value.left(60))));
             }
         }
         if (!removed.isEmpty()) {
@@ -573,11 +593,12 @@ QList<Finding> compareSignatures(const Signature& before, const Signature& after
             out.append(make("headers.modify", QStringLiteral("Static rules touch %1.").arg(joinLimited(rewritten))));
         }
         QStringList beforeTargets;
-        for (const DnrRedirect& r : before.redirects) beforeTargets.append(r.target);
+        for (const DnrRedirect& r : before.redirects) beforeTargets.append(r.identity());
         QStringList newTargets;
         for (const DnrRedirect& r : after.redirects) {
-            if (!beforeTargets.contains(r.target) && !newTargets.contains(r.target)) {
-                newTargets.append(r.target);
+            const QString desc = r.condition.isEmpty() ? r.target : QStringLiteral("%1 for %2").arg(r.target, r.condition);
+            if (!beforeTargets.contains(r.identity()) && !newTargets.contains(desc)) {
+                newTargets.append(desc);
             }
         }
         if (!newTargets.isEmpty()) {

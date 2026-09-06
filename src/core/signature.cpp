@@ -60,18 +60,22 @@ QList<SourceFile> loadSourcesFromDir(const QString& dir, bool contentForAll) {
     const QDir root(dir);
     QDirIterator it(dir, QDir::Files | QDir::Hidden | QDir::NoSymLinks | QDir::NoDotAndDotDot,
                     QDirIterator::Subdirectories);
+    qint64 loaded = 0;
     while (it.hasNext()) {
         const QFileInfo fi = it.nextFileInfo();
         SourceFile file;
         file.path = root.relativeFilePath(fi.filePath());
         file.size = fi.size();
-        if (contentForAll || isAnalyzablePath(file.path)) {
+        const bool wanted = contentForAll || isAnalyzablePath(file.path);
+        // Decide from the size on disk, before anything is read into memory.
+        if (wanted && fi.size() <= kMaxAnalyzedBytes && loaded + fi.size() <= kMaxLoadedBytes) {
             QFile f(fi.filePath());
             if (!f.open(QIODevice::ReadOnly)) {
                 continue;
             }
             file.content = f.readAll();
             file.size = file.content.size();
+            loaded += file.size;
         }
         out.append(file);
     }
@@ -98,6 +102,32 @@ const QSet<QString>& securityHeaders() {
     return headers;
 }
 
+}  // namespace
+
+QString dnrConditionSummary(const QJsonObject& c) {
+    QStringList parts;
+    auto add = [&](const char* label, const QJsonValue& v) {
+        if (v.isString() && !v.toString().isEmpty()) {
+            parts.append(QStringLiteral("%1=%2").arg(QLatin1StringView(label), v.toString()));
+        } else if (v.isArray() && !v.toArray().isEmpty()) {
+            QStringList items;
+            for (const QJsonValue& x : v.toArray()) items.append(x.toString());
+            items.sort();
+            parts.append(QStringLiteral("%1=%2").arg(QLatin1StringView(label), items.join(u',')));
+        }
+    };
+    add("urlFilter", c.value(QStringLiteral("urlFilter")));
+    add("regexFilter", c.value(QStringLiteral("regexFilter")));
+    add("types", c.value(QStringLiteral("resourceTypes")));
+    add("domains", c.value(QStringLiteral("requestDomains")));
+    add("initiators", c.value(QStringLiteral("initiatorDomains")));
+    add("excludedDomains", c.value(QStringLiteral("excludedRequestDomains")));
+    if (c.contains(QStringLiteral("tabIds"))) parts.append(QStringLiteral("tabs"));
+    return parts.join(u' ');
+}
+
+namespace {
+
 QString normalizePath(QString p) {
     p.replace(u'\\', u'/');
     while (p.startsWith(u'/')) {
@@ -119,6 +149,7 @@ void collectDnr(const ManifestFacts& manifest, const QList<SourceFile>& files, S
                 sig.dnrRuleCount++;
                 const QJsonObject action = rule.value(QStringLiteral("action")).toObject();
                 const QString type = action.value(QStringLiteral("type")).toString();
+                const QString condition = dnrConditionSummary(rule.value(QStringLiteral("condition")).toObject());
                 if (type == QStringLiteral("allowAllRequests")) {
                     sig.allowAllRequestsRules++;
                     continue;
@@ -136,7 +167,7 @@ void collectDnr(const ManifestFacts& manifest, const QList<SourceFile>& files, S
                     if (target.isEmpty() && redirect.contains(QStringLiteral("extensionPath"))) {
                         target = QStringLiteral("extension path ") + redirect.value(QStringLiteral("extensionPath")).toString();
                     }
-                    sig.redirects.append({rr.id, rule.value(QStringLiteral("id")).toInt(), target});
+                    sig.redirects.append({rr.id, rule.value(QStringLiteral("id")).toInt(), target, condition});
                     continue;
                 }
                 if (type != QStringLiteral("modifyHeaders")) {
@@ -148,7 +179,8 @@ void collectDnr(const ManifestFacts& manifest, const QList<SourceFile>& files, S
                         const QString header = h.value(QStringLiteral("header")).toString().toLower();
                         if (securityHeaders().contains(header)) {
                             sig.headerMods.append({rr.id, rule.value(QStringLiteral("id")).toInt(), header,
-                                                   h.value(QStringLiteral("operation")).toString()});
+                                                   h.value(QStringLiteral("operation")).toString(),
+                                                   h.value(QStringLiteral("value")).toString(), condition});
                         }
                     }
                 }
@@ -220,7 +252,6 @@ Signature buildSignature(const ManifestFacts& manifest, const QList<SourceFile>&
 
     // Per-file analysis is independent and CPU-bound: run it in parallel, then merge in file
     // order so the result is deterministic.
-    constexpr qint64 kMaxAnalyzedBytes = 48LL * 1024 * 1024;
     struct FileResult {
         FileSummary summary;
         QList<CodeFacts> facts;
@@ -232,11 +263,9 @@ Signature buildSignature(const ManifestFacts& manifest, const QList<SourceFile>&
         r.summary.path = f.path;
         r.summary.bytes = f.size > 0 ? f.size : f.content.size();
         if (isAnalyzablePath(f.path) && f.content.isEmpty() && f.size > 0) {
-            r.warnings.append(QStringLiteral("%1: content not available for analysis").arg(f.path));
-            return r;
-        }
-        if (isAnalyzablePath(f.path) && f.content.size() > kMaxAnalyzedBytes) {
-            r.warnings.append(QStringLiteral("%1: larger than 48 MiB, not analyzed").arg(f.path));
+            r.warnings.append(f.size > kMaxAnalyzedBytes
+                                  ? QStringLiteral("%1: %2 MiB, larger than the 48 MiB analysis limit").arg(f.path).arg(f.size / (1024 * 1024))
+                                  : QStringLiteral("%1: not read (memory budget or unreadable), not analyzed").arg(f.path));
             return r;
         }
         if (isJavaScriptPath(f.path)) {
@@ -344,6 +373,8 @@ QJsonObject Signature::toJson() const {
         ho.insert(QStringLiteral("rule_id"), h.ruleId);
         ho.insert(QStringLiteral("header"), h.header);
         ho.insert(QStringLiteral("operation"), h.operation);
+        ho.insert(QStringLiteral("value"), h.value);
+        ho.insert(QStringLiteral("condition"), h.condition);
         mods.append(ho);
     }
     o.insert(QStringLiteral("dnr_header_mods"), mods);
@@ -353,6 +384,7 @@ QJsonObject Signature::toJson() const {
         ro.insert(QStringLiteral("ruleset"), r.ruleset);
         ro.insert(QStringLiteral("rule_id"), r.ruleId);
         ro.insert(QStringLiteral("target"), r.target);
+        ro.insert(QStringLiteral("condition"), r.condition);
         redirectsJson.append(ro);
     }
     o.insert(QStringLiteral("dnr_redirects"), redirectsJson);
@@ -444,6 +476,9 @@ Signature Signature::fromJson(const QJsonObject& o) {
         return s;
     }
     s.schema = o.value(QStringLiteral("schema")).toInt(1);
+    if (s.schema != kSignatureSchema) {
+        return Signature();  // stale: the caller recomputes from the blobs
+    }
     s.version = o.value(QStringLiteral("version")).toString();
     s.keyMatchesId = o.value(QStringLiteral("key_matches_id")).toBool(true);
     const QJsonObject m = o.value(QStringLiteral("manifest")).toObject();
@@ -457,13 +492,15 @@ Signature Signature::fromJson(const QJsonObject& o) {
         s.headerMods.append({h.value(QStringLiteral("ruleset")).toString(),
                              h.value(QStringLiteral("rule_id")).toInt(),
                              h.value(QStringLiteral("header")).toString(),
-                             h.value(QStringLiteral("operation")).toString()});
+                             h.value(QStringLiteral("operation")).toString(),
+                             h.value(QStringLiteral("value")).toString(),
+                             h.value(QStringLiteral("condition")).toString()});
     }
     s.dnrRuleCount = o.value(QStringLiteral("dnr_rule_count")).toInt();
     for (const QJsonValue& v : o.value(QStringLiteral("dnr_redirects")).toArray()) {
         const QJsonObject r = v.toObject();
         s.redirects.append({r.value(QStringLiteral("ruleset")).toString(), r.value(QStringLiteral("rule_id")).toInt(),
-                            r.value(QStringLiteral("target")).toString()});
+                            r.value(QStringLiteral("target")).toString(), r.value(QStringLiteral("condition")).toString()});
     }
     s.allowAllRequestsRules = o.value(QStringLiteral("dnr_allow_all_requests")).toInt();
     s.wasmFiles = toStringList(o.value(QStringLiteral("wasm_files")));

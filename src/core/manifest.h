@@ -23,7 +23,7 @@ struct ContentScript {
     bool matchAboutBlank = false;
     bool matchOriginAsFallback = false;  // also injects into about:, data:, blob: frames
 
-    QString key() const;  // sorted js files, identifies the declaration across versions
+    QString key() const;  // scripts, styles and match patterns: identifies the declaration across versions
 };
 
 struct RuleResource {

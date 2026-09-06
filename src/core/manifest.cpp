@@ -12,9 +12,13 @@
 namespace extwatch {
 
 QString ContentScript::key() const {
-    QStringList sorted = js;
-    sorted.sort();
-    return sorted.join(u'|');
+    // Scripts plus styles plus match patterns: two declarations that inject the same file into
+    // different sites are different declarations and must be compared with their own past.
+    QStringList scripts = js + css;
+    scripts.sort();
+    QStringList sites = matches;
+    sites.sort();
+    return scripts.join(u'|') + QStringLiteral("@") + sites.join(u'|');
 }
 
 bool isMatchPattern(const QString& s) {

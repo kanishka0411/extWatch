@@ -1,4 +1,7 @@
+#include <QJsonArray>
+#include <QJsonDocument>
 #include <QTemporaryDir>
+#include <algorithm>
 #include <QtTest>
 
 #include "core/analyzer.h"
@@ -263,6 +266,120 @@ private slots:
         const Signature v2 = sigFromSources({src("manifest.json", manifestWith("")), src("a.js", "eval(trusted);"), src("b.js", "eval(remote);")});
         const QList<Finding> f = compareSignatures(v1, v2);
         QVERIFY(hasRule(f, "remote_code.eval"));
+    }
+
+    void secondEvalInTheSameFileIsReported() {
+        const Signature v1 = sigFromSources({src("manifest.json", manifestWith("")), src("a.js", "eval(trusted);")});
+        const Signature v2 = sigFromSources({src("manifest.json", manifestWith("")), src("a.js", "eval(trusted);\nfetch(u).then(r => r.text()).then(t => eval(t));")});
+        QVERIFY(hasRule(compareSignatures(v1, v2), "remote_code.eval"));
+        // A moved line or an edit near an existing eval is not an addition.
+        const Signature moved = sigFromSources({src("manifest.json", manifestWith("")), src("a.js", "const x = 1;\n\n\neval(trusted);")});
+        QVERIFY(!hasRule(compareSignatures(v1, moved), "remote_code.eval"));
+        const Signature edited = sigFromSources({src("manifest.json", manifestWith("")), src("a.js", "eval(trusted2);")});
+        QVERIFY(!hasRule(compareSignatures(v1, edited), "remote_code.eval"));
+    }
+
+    void contentScriptsSharingAFileAreDistinctDeclarations() {
+        // Same script injected into two sites: only the bank declaration gains all_frames.
+        const QByteArray before = manifestWith("\"content_scripts\":[{\"matches\":[\"https://news.example.com/*\"],\"js\":[\"ui.js\"],\"all_frames\":true},{\"matches\":[\"https://bank.example.com/*\"],\"js\":[\"ui.js\"],\"exclude_matches\":[\"https://bank.example.com/login*\"]}]");
+        const QByteArray after = manifestWith("\"content_scripts\":[{\"matches\":[\"https://news.example.com/*\"],\"js\":[\"ui.js\"],\"all_frames\":true},{\"matches\":[\"https://bank.example.com/*\"],\"js\":[\"ui.js\"],\"all_frames\":true,\"match_about_blank\":true}]");
+        const QList<Finding> f = compareSignatures(sigFromSources({src("manifest.json", before)}), sigFromSources({src("manifest.json", after)}));
+        QVERIFY(hasRule(f, "content_scripts.broadened"));
+        const Finding broadened = *std::find_if(f.cbegin(), f.cend(), [](const Finding& x) { return x.rule == QStringLiteral("content_scripts.broadened"); });
+        QVERIFY2(broadened.detail.contains(QStringLiteral("no longer excludes")), qPrintable(broadened.detail));
+        QVERIFY2(broadened.detail.contains(QStringLiteral("about:blank")), qPrintable(broadened.detail));
+    }
+
+    void dnrScopeAndValueAreCompared() {
+        const QByteArray manifest = manifestWith("\"declarative_net_request\":{\"rule_resources\":[{\"id\":\"r\",\"enabled\":true,\"path\":\"rules.json\"}]}");
+        const QByteArray narrow = "[{\"id\":1,\"action\":{\"type\":\"modifyHeaders\",\"responseHeaders\":[{\"header\":\"content-security-policy\",\"operation\":\"remove\"}]},\"condition\":{\"urlFilter\":\"||mine.example.com\"}}]";
+        const QByteArray everywhere = "[{\"id\":1,\"action\":{\"type\":\"modifyHeaders\",\"responseHeaders\":[{\"header\":\"content-security-policy\",\"operation\":\"remove\"}]},\"condition\":{}}]";
+        const Signature v1 = sigFromSources({src("manifest.json", manifest), src("rules.json", narrow)});
+        const Signature v2 = sigFromSources({src("manifest.json", manifest), src("rules.json", everywhere)});
+        QCOMPARE(v1.headerMods.size(), 1);
+        QVERIFY2(v1.headerMods.first().condition.contains(QStringLiteral("mine.example.com")), qPrintable(v1.headerMods.first().condition));
+        QVERIFY(v2.headerMods.first().condition.isEmpty());
+        const QList<Finding> f = compareSignatures(v1, v2);
+        QVERIFY(hasRule(f, "headers.strip_security"));  // one site -> every request is a real change
+        QCOMPARE(maxSeverity(f), Severity::High);
+        QVERIFY(!hasRule(compareSignatures(v1, v1), "headers.strip_security"));
+        // A weaker value for a set header is also a change.
+        const QByteArray setA = "[{\"id\":1,\"action\":{\"type\":\"modifyHeaders\",\"responseHeaders\":[{\"header\":\"content-security-policy\",\"operation\":\"set\",\"value\":\"default-src 'self'\"}]},\"condition\":{}}]";
+        const QByteArray setB = "[{\"id\":1,\"action\":{\"type\":\"modifyHeaders\",\"responseHeaders\":[{\"header\":\"content-security-policy\",\"operation\":\"set\",\"value\":\"default-src *\"}]},\"condition\":{}}]";
+        const QList<Finding> g = compareSignatures(sigFromSources({src("manifest.json", manifest), src("rules.json", setA)}),
+                                                   sigFromSources({src("manifest.json", manifest), src("rules.json", setB)}));
+        QVERIFY(hasRule(g, "headers.modify"));
+        const Signature back = Signature::fromJson(v1.toJson());
+        QCOMPARE(back.headerMods.first().condition, v1.headerMods.first().condition);
+    }
+
+    void oversizedFilesAreNeverReadIntoMemory() {
+        QTemporaryDir tmp;
+        QFile manifest(tmp.path() + QStringLiteral("/manifest.json"));
+        QVERIFY(manifest.open(QIODevice::WriteOnly));
+        manifest.write(manifestWith(""));
+        manifest.close();
+        QFile big(tmp.path() + QStringLiteral("/big.js"));
+        QVERIFY(big.open(QIODevice::WriteOnly));
+        QVERIFY(big.resize(kMaxAnalyzedBytes + 1));  // sparse on every platform we build for
+        big.close();
+        const QList<SourceFile> files = loadSourcesFromDir(tmp.path());
+        QCOMPARE(files.size(), 2);
+        for (const SourceFile& f : files) {
+            if (f.path == QStringLiteral("big.js")) {
+                QVERIFY(f.content.isEmpty());  // decided from the size on disk, never read
+                QCOMPARE(f.size, kMaxAnalyzedBytes + 1);
+            }
+        }
+        const Signature sig = buildSignature(readManifest(tmp.path()), files, QString());
+        QVERIFY(!sig.analysisWarnings.isEmpty());
+        QVERIFY2(sig.analysisWarnings.first().contains(QStringLiteral("48 MiB")), qPrintable(sig.analysisWarnings.first()));
+    }
+
+    void staleSignaturesAreNotReused() {
+        Signature sig = sigFromSources({src("manifest.json", manifestWith("")), src("a.js", "fetch('https://api.example.net/');")});
+        QCOMPARE(sig.schema, kSignatureSchema);
+        QJsonObject json = sig.toJson();
+        QVERIFY(!Signature::fromJson(json).domains.isEmpty());
+        json.insert(QStringLiteral("schema"), kSignatureSchema - 1);
+        QVERIFY(Signature::fromJson(json).domains.isEmpty());  // an older analyzer's output is discarded
+    }
+
+    void scanExitCodeContract() {
+        ScanResult r;
+        QCOMPARE(scanExitCode(r), 0);
+        ScanEvent baseline;
+        baseline.kind = QStringLiteral("baseline");
+        baseline.maxSeverity = QStringLiteral("high");
+        r.events.append(baseline);
+        QCOMPARE(scanExitCode(r), 0);  // a risky but unchanged extension is not an alarm
+        ScanEvent update;
+        update.kind = QStringLiteral("updated");
+        update.maxSeverity = QStringLiteral("medium");
+        r.events.append(update);
+        QCOMPARE(scanExitCode(r), 0);
+        r.warnings.append(QStringLiteral("x"));
+        QCOMPARE(scanExitCode(r), 1);
+        update.maxSeverity = QStringLiteral("high");
+        r.events.append(update);
+        QCOMPARE(scanExitCode(r), 3);
+    }
+
+    void rulesCatalogMatchesTheBinary() {
+        // rules/rules.v1.json is exported from the C++ table; this pins the two together.
+        QFile f(testutil::fixturesDir() + QStringLiteral("/../rules/rules.v1.json"));
+        QVERIFY2(f.open(QIODevice::ReadOnly), qPrintable(f.fileName()));
+        const QJsonArray exported = QJsonDocument::fromJson(f.readAll()).object().value(QStringLiteral("rules")).toArray();
+        QCOMPARE(exported.size(), allRules().size());
+        QHash<QString, QJsonObject> byId;
+        for (const QJsonValue& v : exported) byId.insert(v.toObject().value(QStringLiteral("id")).toString(), v.toObject());
+        for (const RuleInfo& r : allRules()) {
+            QVERIFY2(byId.contains(r.id), qPrintable(QStringLiteral("%1 missing from rules.v1.json (run: extwatch rules --json > rules/rules.v1.json)").arg(r.id)));
+            const QJsonObject o = byId.value(r.id);
+            QCOMPARE(o.value(QStringLiteral("severity")).toString(), severityId(r.severity));
+            QCOMPARE(o.value(QStringLiteral("title")).toString(), r.title);
+            QCOMPARE(o.value(QStringLiteral("explanation")).toString(), r.explanation);
+        }
     }
 
     void evalAliasesAndBrowserNamespaceAreSeen() {

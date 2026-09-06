@@ -15,11 +15,14 @@ namespace extwatch {
 QList<SourceFile> loadSourcesFromArchive(Database& db, const BlobStore& blobs, qint64 versionId,
                                          bool contentForAll) {
     QList<SourceFile> out;
+    qint64 loaded = 0;
     for (const FileEntry& f : db.filesForVersion(versionId)) {
         SourceFile file;
         file.path = f.relPath;
         file.size = f.size;
-        if (contentForAll || isAnalyzablePath(f.relPath)) {
+        const bool wanted = contentForAll || isAnalyzablePath(f.relPath);
+        if (wanted && (contentForAll || (f.size <= kMaxAnalyzedBytes && loaded + f.size <= kMaxLoadedBytes))) {
+            loaded += f.size;
             QFile blob(blobs.pathFor(f.sha256));
             if (!blob.open(QIODevice::ReadOnly)) {
                 continue;
@@ -38,7 +41,9 @@ std::optional<Signature> signatureForVersion(Database& db, const BlobStore& blob
     }
     if (!row->signatureJson.isEmpty()) {
         const QJsonObject json = QJsonDocument::fromJson(row->signatureJson.toUtf8()).object();
-        if (json.value(QStringLiteral("schema")).toInt() == 1) {
+        // Only a signature produced by the current analyzer is reused; anything older is
+        // recomputed from the immutable blobs so old and new versions are compared like for like.
+        if (json.value(QStringLiteral("schema")).toInt() == kSignatureSchema) {
             return Signature::fromJson(json);
         }
     }

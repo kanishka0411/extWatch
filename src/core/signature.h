@@ -20,12 +20,20 @@ struct SourceFile {
 // Files whose content the analysis reads: JavaScript, HTML and JSON.
 bool isAnalyzablePath(const QString& path);
 
+// Resource budget for untrusted input: a single file above kMaxAnalyzedBytes is never read, and
+// once kMaxLoadedBytes of content is in memory the remaining files keep only name and size.
+constexpr qint64 kMaxAnalyzedBytes = 48LL * 1024 * 1024;
+constexpr qint64 kMaxLoadedBytes = 512LL * 1024 * 1024;
+
 // A header modification declared in a static declarativeNetRequest ruleset.
 struct DnrHeaderMod {
     QString ruleset;
     int ruleId = 0;
     QString header;     // lower-case
     QString operation;  // remove, set, append
+    QString value;      // for set/append
+    QString condition;  // canonical summary of the rule condition (empty = every request)
+    QString identity() const { return header + u'|' + operation + u'|' + value + u'|' + condition; }
 };
 
 struct FileSummary {
@@ -40,13 +48,23 @@ struct FileSummary {
 struct DnrRedirect {
     QString ruleset;
     int ruleId = 0;
-    QString target;  // url, regexSubstitution or transform summary
+    QString target;     // url, regexSubstitution or transform summary
+    QString condition;  // canonical summary of the rule condition
+    QString identity() const { return target + u'|' + condition; }
 };
+
+// "urlFilter=… regexFilter=… types=… domains=… initiators=…" for a rule's condition; empty when
+// the rule applies to every request.
+QString dnrConditionSummary(const QJsonObject& condition);
 
 // The behavior signature of one extension version: what the manifest declares plus what the
 // code can do. Two signatures are compared by the rules engine to produce findings.
+// Bump whenever the facts a signature carries or how they are extracted change; cached
+// signatures with an older schema are recomputed from the archived blobs.
+constexpr int kSignatureSchema = 2;
+
 struct Signature {
-    int schema = 1;
+    int schema = kSignatureSchema;
     QString version;
     bool keyMatchesId = true;
     ManifestFacts manifest;

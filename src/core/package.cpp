@@ -33,8 +33,8 @@ namespace {
 
 constexpr qint64 kMaxArchiveBytes = 512LL * 1024 * 1024;
 constexpr mz_uint kMaxEntries = 20000;
-constexpr qint64 kMaxEntryBytes = 128LL * 1024 * 1024;
-constexpr qint64 kMaxTotalBytes = 1024LL * 1024 * 1024;
+constexpr qint64 kMaxEntryBytes = kMaxAnalyzedBytes;
+constexpr qint64 kMaxTotalBytes = kMaxLoadedBytes;
 constexpr qint64 kMaxRatio = 200;
 
 QList<SourceFile> readZip(const QByteArray& data, QString* error, QStringList* warnings) {
