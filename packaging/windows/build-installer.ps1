@@ -8,8 +8,11 @@ if ($env:QT_ROOT) { $env:PATH = "$env:QT_ROOT\bin;$env:PATH" }
 
 cmake --preset ci-windows -DEXTWATCH_BUILD_TESTS=OFF
 cmake --build --preset ci-windows
-$exe = "build\ci-windows\src\Release\extwatch.exe"
-$deploy = "build\ci-windows\src\Release\deploy"
+# The Visual Studio generator puts the exe under the build root, not under src\: look for it.
+$exe = Get-ChildItem -Path build\ci-windows -Recurse -Filter extwatch.exe |
+  Where-Object { $_.FullName -notmatch '\\deploy\\' } | Select-Object -First 1 -ExpandProperty FullName
+if (-not $exe) { throw "extwatch.exe not found under build\ci-windows" }
+$deploy = "build\ci-windows\deploy"
 if (Test-Path $deploy) { Remove-Item -Recurse -Force $deploy }
 New-Item -ItemType Directory -Path $deploy | Out-Null
 Copy-Item $exe $deploy

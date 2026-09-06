@@ -31,6 +31,25 @@ DESTDIR="$PWD/build/AppDir" cmake --install build/release-linux >/dev/null
 
 export QMAKE="${QMAKE:-$(command -v qmake6 || command -v qmake)}"
 export EXTRA_QT_PLUGINS="sqldrivers;platforms;iconengines;imageformats"
+
+# The Qt plugin deploys every SQL driver it finds, and the official Qt builds ship drivers
+# (Mimer, ODBC, PostgreSQL, MySQL) whose client libraries are not installed, which makes the
+# deploy fail. ExtWatch only needs SQLite. On a throwaway Qt (CI) the other drivers are removed;
+# elsewhere the script only says what to do.
+QT_PLUGINS_DIR="$("$QMAKE" -query QT_INSTALL_PLUGINS)"
+for drv in "$QT_PLUGINS_DIR"/sqldrivers/libqsql*.so; do
+  [ -e "$drv" ] || continue
+  case "$(basename "$drv")" in
+    libqsqlite.so) ;;
+    *)
+      if [ -n "${CI:-}" ] || [ "${EXTWATCH_PRUNE_SQLDRIVERS:-0}" = 1 ]; then
+        rm -f "$drv"
+      else
+        echo "note: $drv may break linuxdeploy; set EXTWATCH_PRUNE_SQLDRIVERS=1 to remove unused SQL drivers" >&2
+      fi
+      ;;
+  esac
+done
 export OUTPUT="dist/ExtWatch-$VERSION-$ARCH.AppImage"
 export APPIMAGE_EXTRACT_AND_RUN=1
 "$TOOLS/linuxdeploy" --appdir build/AppDir --plugin qt --output appimage \
