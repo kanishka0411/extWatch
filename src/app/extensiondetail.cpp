@@ -64,6 +64,7 @@ QString kindLabel(const QString& kind) {
     if (kind == QStringLiteral("enabled")) return QStringLiteral("Enabled");
     if (kind == QStringLiteral("disabled")) return QStringLiteral("Disabled");
     if (kind == QStringLiteral("removed")) return QStringLiteral("Removed");
+    if (kind == QStringLiteral("reinstalled")) return QStringLiteral("Reinstalled");
     if (kind == QStringLiteral("publisher_changed")) return QStringLiteral("Publisher changed");
     if (kind == QStringLiteral("removed_from_store")) return QStringLiteral("Gone from store");
     return kind;
@@ -150,7 +151,7 @@ void ExtensionDetailView::buildUi() {
         CompanionServer::Target target;
         target.extId = m_ext->extId;
         target.browserKindId = m_browser ? m_browser->kind : QStringLiteral("chrome");
-        for (const ExtensionRow& row : m_db.extensionsForProfile(m_ext->profileId)) {
+        for (const ExtensionRow& row : m_db.extensionsForProfile(m_ext->profileId, /*presentOnly=*/true)) {
             target.profileExtensionIds.append(row.extId);
         }
         emit toggleEnabledRequested(target, !m_ext->enabled);
@@ -434,7 +435,7 @@ void ExtensionDetailView::loadHeader() {
     m_quarantineBtn->setEnabled(hasFiles);
     bool restorable = false;
     for (const QuarantineRow& q : m_db.quarantinesForExtension(m_ext->id)) {
-        restorable = restorable || q.state != QStringLiteral("restored");
+        restorable = restorable || !q.state.startsWith(QStringLiteral("restored"));
     }
     m_restoreBtn->setVisible(restorable);
 }
@@ -813,7 +814,7 @@ void ExtensionDetailView::restoreFromQuarantine() {
     QStringList messages;
     bool anyFailure = false;
     for (const QuarantineRow& q : m_db.quarantinesForExtension(m_ext->id)) {
-        if (q.state == QStringLiteral("restored")) {
+        if (q.state.startsWith(QStringLiteral("restored"))) {
             continue;
         }
         const ActionResult r = restoreQuarantine(m_db, m_dataDir, q.id);

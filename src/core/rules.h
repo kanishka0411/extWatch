@@ -12,6 +12,10 @@ namespace extwatch {
 
 enum class Severity { Info = 0, Low = 1, Medium = 2, High = 3 };
 
+// Bump when a rule's meaning, severity or identity logic changes; stored findings from an older
+// generation are recomputed from the cached signatures.
+constexpr int kFindingsSchema = 1;
+
 QString severityId(Severity s);
 Severity severityFromId(const QString& id);
 

@@ -27,12 +27,8 @@ StoreTrackingResult runStoreTracking(const QString& dataDir, int maxFetches, qin
     QHash<QString, QList<ExtensionRow>> byExtId;
     for (const BrowserRow& b : db.browsers()) {
         for (const ProfileRow& p : db.profilesForBrowser(b.id)) {
-            for (const ExtensionRow& e : db.extensionsForProfile(p.id)) {
+            for (const ExtensionRow& e : db.extensionsForProfile(p.id, /*presentOnly=*/true)) {
                 if (!e.fromWebstore) {
-                    continue;
-                }
-                const QList<EventRow> events = db.eventsForExtension(e.id);
-                if (!events.isEmpty() && events.last().kind == QStringLiteral("removed")) {
                     continue;
                 }
                 byExtId[e.extId].append(e);

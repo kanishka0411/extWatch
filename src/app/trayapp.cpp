@@ -160,10 +160,9 @@ void TrayApp::rescan() {
     m_statusAction->setText(m_firstScan ? QStringLiteral("Scanning… (the first run analyzes every extension)")
                                         : QStringLiteral("Scanning…"));
     ScanOptions options = scanOptions();
-    // Stored fingerprints (per-file size and mtime) make rescans cheap; every fourth scan and the
-    // first one after launch re-hash every tree so a same-size, same-mtime overwrite is caught.
-    options.forceHash = m_firstScan || m_scansSinceFullHash >= 3;
-    m_scansSinceFullHash = options.forceHash ? 0 : m_scansSinceFullHash + 1;
+    // The first scan after launch re-hashes every tree; afterwards the scanner's own every-fourth
+    // policy (a counter in the database, shared with the CLI) takes over.
+    options.forceHash = m_firstScan;
     m_watcher->setFuture(QtConcurrent::run(runScan, options));
 }
 
@@ -274,7 +273,8 @@ void TrayApp::notifyChanges(const ScanResult& result) {
             continue;
         }
         anyChange = true;
-        if (e.kind == QStringLiteral("updated") || e.kind == QStringLiteral("pending_version")) {
+        if (e.kind == QStringLiteral("updated") || e.kind == QStringLiteral("pending_version") ||
+            e.kind == QStringLiteral("modified_in_place") || e.kind == QStringLiteral("reinstalled")) {
             if (severityRank(e.maxSeverity) < threshold) {
                 continue;
             }

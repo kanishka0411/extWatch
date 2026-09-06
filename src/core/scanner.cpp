@@ -11,6 +11,7 @@
 #include "core/chrometime.h"
 #include "core/database.h"
 #include "core/analyzer.h"
+#include "core/rules.h"
 #include "core/signature.h"
 #include "core/hashing.h"
 #include "core/inventory.h"
@@ -74,6 +75,9 @@ QString ScanEvent::summary() const {
         return QStringLiteral("%1 was disabled").arg(extName);
     } else if (kind == QStringLiteral("removed")) {
         return QStringLiteral("%1 was removed").arg(extName);
+    } else if (kind == QStringLiteral("reinstalled")) {
+        base = fromVersion == toVersion ? QStringLiteral("%1 %2 was installed again").arg(extName, toVersion)
+                                        : QStringLiteral("%1 installed again at %2 (was %3)").arg(extName, toVersion, fromVersion);
     } else {
         base = QStringLiteral("%1: %2").arg(extName, kind);
     }
@@ -231,6 +235,9 @@ void persistExtension(PersistContext& ctx, qint64 profileId, const InstalledExte
         events.append(ev);
     };
 
+    // A row that a previous scan marked absent and that is back is a reinstall, even when the
+    // bytes are identical; otherwise the return would leave no trace.
+    const bool reappeared = before && !before->present;
     std::optional<qint64> previousCurrent = before ? before->currentVersionId : std::nullopt;
     QString previousVersion;
     if (previousCurrent) {
@@ -320,6 +327,14 @@ void persistExtension(PersistContext& ctx, qint64 profileId, const InstalledExte
                 ev.toVersionRowId = versionId;
                 storeEvent(ev);
                 db.setCurrentVersion(extensionId, versionId);
+            } else if (reappeared) {
+                ScanEvent ev = makeEvent(QStringLiteral("reinstalled"));
+                ev.fromVersion = previousVersion;
+                ev.toVersion = vr.version;
+                ev.fromVersionRowId = previousCurrent;
+                ev.toVersionRowId = versionId;
+                storeEvent(ev);
+                db.setCurrentVersion(extensionId, versionId);
             } else if (*previousCurrent != *versionId) {
                 // Same version string but different bytes is its own kind of event: nothing was
                 // "updated", the installed files changed underneath the browser.
@@ -353,14 +368,11 @@ void persistExtension(PersistContext& ctx, qint64 profileId, const InstalledExte
 void recordRemovals(PersistContext& ctx, qint64 profileId, const BrowserReport& browser,
                     const Profile& profile, QList<ScanEvent>& events) {
     Database& db = *ctx.db;
-    for (const ExtensionRow& row : db.extensionsForProfile(profileId)) {
+    for (const ExtensionRow& row : db.extensionsForProfile(profileId, /*presentOnly=*/true)) {
         if (ctx.seenExtensions.contains(row.id)) {
             continue;  // membership, not a timestamp: two scans in the same second stay correct
         }
-        const QList<EventRow> history = db.eventsForExtension(row.id);
-        if (!history.isEmpty() && history.last().kind == QStringLiteral("removed")) {
-            continue;
-        }
+        db.setExtensionPresent(row.id, false);
         ScanEvent ev;
         ev.kind = QStringLiteral("removed");
         ev.browserKind = browserKindId(browser.install.kind);
@@ -488,6 +500,17 @@ ScanResult runScan(const ScanOptions& options) {
     }
     const bool canPersist = ctx.db != nullptr;
 
+    // Unchanged trees are recognised by fingerprint; every fourth persisted scan, whichever process
+    // runs it, re-hashes everything. The counter lives in the database so the tray and the CLI
+    // share one policy.
+    int scansSinceFullHash = 0;
+    bool fullHash = options.forceHash || !options.computeHashes;
+    if (canPersist && options.computeHashes) {
+        scansSinceFullHash = db.metaValue(QStringLiteral("scans_since_full_hash")).toInt();
+        fullHash = fullHash || scansSinceFullHash >= 3;
+    }
+    result.fullHash = fullHash && options.computeHashes;
+
     const QList<BrowserInstall> candidates =
         options.candidates.isEmpty() ? knownBrowserLocations() : options.candidates;
     for (const DiscoveredBrowser& found : discoverBrowsers(candidates)) {
@@ -531,7 +554,7 @@ ScanResult runScan(const ScanOptions& options) {
                         }
                     }
                 }
-                ExtensionReport report = buildReport(ext, options.computeHashes, options.settleSeconds, known, options.forceHash);
+                ExtensionReport report = buildReport(ext, options.computeHashes, options.settleSeconds, known, fullHash);
                 if (profileId) {
                     persistExtension(ctx, *profileId, ext, report, br, profile, result.events);
                 }
@@ -546,6 +569,9 @@ ScanResult runScan(const ScanOptions& options) {
     }
 
     result.needsRescan = ctx.needsRescan;
+    if (canPersist && options.computeHashes) {
+        db.setMetaValue(QStringLiteral("scans_since_full_hash"), fullHash ? QStringLiteral("0") : QString::number(scansSinceFullHash + 1));
+    }
 
     // Profiles the browser deleted (or a browser that was uninstalled) are never visited above.
     // Within the browsers this scan was asked to cover, a known profile that was not seen has
@@ -591,6 +617,10 @@ ScanResult runScan(const ScanOptions& options) {
         for (const EventRow& e : db.unanalyzedEvents(20)) {
             analyzeEvent(db, *blobs, e.id);
         }
+        // Findings from an older rules generation are redone from the (cached) signatures.
+        for (const EventRow& e : db.staleFindingsEvents(kFindingsSchema, 50)) {
+            analyzeEvent(db, *blobs, e.id);
+        }
         // Signatures written by an older analyzer are recomputed from the archived blobs, a few
         // per scan, so an upgrade does not stall the first scan and old versions compare like
         // for like with new ones.
@@ -626,6 +656,7 @@ QJsonObject ScanResult::toJson() const {
     meta.insert(QStringLiteral("version"), QStringLiteral(EXTWATCH_VERSION));
     meta.insert(QStringLiteral("schema"), EXTWATCH_SCHEMA_VERSION);
     meta.insert(QStringLiteral("scanned_at"), scannedAt.toString(Qt::ISODate));
+    meta.insert(QStringLiteral("full_hash"), fullHash);
     if (!dataDir.isEmpty()) {
         meta.insert(QStringLiteral("data_dir"), dataDir);
     }

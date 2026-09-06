@@ -272,6 +272,8 @@ int cmdScan(const CommonOptions& c) {
     for (const QString& w : result.warnings) {
         err() << "warning: " << w << "\n";
     }
+    out() << (result.fullHash ? "integrity: every installed file was re-hashed\n"
+                              : "integrity: unchanged trees trusted by fingerprint (every fourth scan or --verify re-hashes)\n");
     out().flush();
     err().flush();
     return scanExitCode(result);
@@ -863,9 +865,17 @@ int cmdDoctor(const CommonOptions& c) {
 
     int quarantineIssues = 0;
     for (const QuarantineRow& q : db.allQuarantines()) {
-        if (q.state != QStringLiteral("restored") && !QFileInfo(q.quarantinePath).isDir()) {
+        const bool onDisk = QFileInfo(q.quarantinePath).isDir();
+        if (!q.state.startsWith(QStringLiteral("restored")) && !onDisk) {
             quarantineIssues++;
             problems.append(QStringLiteral("quarantine %1 (%2) is missing on disk").arg(q.id.left(8), q.extId));
+        } else if (q.state == QStringLiteral("restored_copy_remaining")) {
+            if (onDisk) {
+                quarantineIssues++;
+                problems.append(QStringLiteral("quarantine %1 (%2) was restored but its copy is still at %3; it can be deleted").arg(q.id.left(8), q.extId, q.quarantinePath));
+            } else {
+                db.setQuarantineState(q.id, QStringLiteral("restored"));  // the leftover is gone
+            }
         }
     }
     report.insert(QStringLiteral("quarantine_issues"), quarantineIssues);

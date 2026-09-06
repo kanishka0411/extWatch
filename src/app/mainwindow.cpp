@@ -131,7 +131,7 @@ void MainWindow::reloadTree() {
     QStringList recent;
     for (const BrowserRow& b : m_db.browsers()) {
         for (const ProfileRow& p : m_db.profilesForBrowser(b.id)) {
-            const QList<ExtensionRow> exts = m_db.extensionsForProfile(p.id);
+            const QList<ExtensionRow> exts = m_db.extensionsForProfile(p.id, /*presentOnly=*/true);
             if (exts.isEmpty()) {
                 continue;
             }
@@ -145,11 +145,7 @@ void MainWindow::reloadTree() {
             group->setFlags(group->flags() & ~Qt::ItemIsSelectable);
             group->setExpanded(true);
             for (const ExtensionRow& e : exts) {
-                // Skip extensions that have been removed (their last event is "removed").
                 const QList<EventRow> events = m_db.eventsForExtension(e.id);
-                if (!events.isEmpty() && events.last().kind == QStringLiteral("removed")) {
-                    continue;
-                }
                 extensions++;
                 auto* item = new QTreeWidgetItem(group);
                 item->setData(0, Qt::UserRole, e.id);

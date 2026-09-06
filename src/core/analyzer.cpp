@@ -95,7 +95,8 @@ QList<Finding> analyzeEvent(Database& db, const BlobStore& blobs, qint64 eventId
     }
     const QList<Finding> findings = compareSignatures(from, *to);
     db.setEventFindings(eventId, severityId(maxSeverity(findings)),
-                        QString::fromUtf8(QJsonDocument(findingsToJson(findings)).toJson(QJsonDocument::Compact)));
+                        QString::fromUtf8(QJsonDocument(findingsToJson(findings)).toJson(QJsonDocument::Compact)),
+                        kFindingsSchema);
     return findings;
 }
 
@@ -223,7 +224,8 @@ std::optional<ChangeReport> buildChangeReport(Database& db, const BlobStore& blo
     // Findings are recomputed from the stored signatures so the view always reflects the current
     // rules; the stored copy (used for lists and notifications) is refreshed at the same time.
     db.setEventFindings(eventId, severityId(maxSeverity(r->findings)),
-                        QString::fromUtf8(QJsonDocument(findingsToJson(r->findings)).toJson(QJsonDocument::Compact)));
+                        QString::fromUtf8(QJsonDocument(findingsToJson(r->findings)).toJson(QJsonDocument::Compact)),
+                        kFindingsSchema);
     return r;
 }
 

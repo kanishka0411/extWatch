@@ -107,6 +107,7 @@ struct ScanResult {
     QStringList warnings;
     QString dataDir;
     bool needsRescan = false;  // an unsettled version directory was skipped
+    bool fullHash = false;     // every file was re-hashed (no fingerprint shortcuts)
 
     int profileCount() const;
     int extensionCount() const;

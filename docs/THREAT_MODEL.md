@@ -28,7 +28,8 @@ extension version and analyzes their code. This is what it defends against and w
   extracted copy is compared with the embedded one.
 - **Rescans trust per-file metadata, sweeps re-hash.** Between full hashes an unchanged version
   directory is recognised by a fingerprint over every file's path, size and mtime. A rewrite that
-  preserves all three for a file would pass; the first scan after launch, every fourth scan, and
+  preserves all three for a file would pass; the first scan after the app launches, every fourth
+  persisted scan (a counter in the database, shared by the app and `extwatch scan`), and
   `extwatch scan --verify` hash every file again.
 - **Ambiguity fails closed.** A Disable request that could reach two profiles with identical
   extension inventories is refused, and a `version@hash` reference that matches more than one

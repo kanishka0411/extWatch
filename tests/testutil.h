@@ -127,4 +127,18 @@ inline void simulateUpdate(const QString& profilePath, const QString& newVersion
     writeJson(prefsPath, prefs);
 }
 
+// The user (or the browser) uninstalls the fixture extension: files gone, prefs record gone.
+inline void simulateRemoval(const QString& profilePath) {
+    const QString extId = fixtureExtensionId();
+    QDir(profilePath + QStringLiteral("/Extensions/") + extId).removeRecursively();
+    const QString prefsPath = profilePath + QStringLiteral("/Secure Preferences");
+    QJsonObject prefs = readJson(prefsPath);
+    QJsonObject extensions = prefs.value(QStringLiteral("extensions")).toObject();
+    QJsonObject settings = extensions.value(QStringLiteral("settings")).toObject();
+    settings.remove(extId);
+    extensions.insert(QStringLiteral("settings"), settings);
+    prefs.insert(QStringLiteral("extensions"), extensions);
+    writeJson(prefsPath, prefs);
+}
+
 }  // namespace testutil

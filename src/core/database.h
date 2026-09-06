@@ -40,6 +40,7 @@ struct ExtensionRow {
     qint64 lastSeen = 0;
     std::optional<qint64> currentVersionId;
     QString grantsJson;  // effective host/API grants from the browser prefs
+    bool present = true;  // installed right now; false once a scan found it gone (history is kept)
 };
 
 struct VersionRow {
@@ -87,13 +88,14 @@ struct EventRow {
     QString maxSeverity;  // info, low, medium, high (empty when not analyzed)
     QString findingsJson;
     bool acknowledged = false;
+    int findingsSchema = 0;  // rules generation that produced the findings; older ones are redone
 };
 
 // SQLite store for snapshots and events. One instance per thread (Qt SQL connections are
 // thread-affine); instances are cheap to create.
 class Database {
 public:
-    static constexpr int kSchemaVersion = 2;
+    static constexpr int kSchemaVersion = 3;
 
     Database();
     ~Database();
@@ -119,6 +121,11 @@ public:
                            int location, bool fromWebstore, bool enabled, qint64 now);
     bool setCurrentVersion(qint64 extensionId, std::optional<qint64> versionId);
     bool setExtensionGrants(qint64 extensionId, const QString& grantsJson);
+    bool setExtensionPresent(qint64 extensionId, bool present);
+
+    // Free-form key/value settings shared by every ExtWatch process using this database.
+    QString metaValue(const QString& key);
+    bool setMetaValue(const QString& key, const QString& value);
 
     std::optional<qint64> findVersionByTreeHash(qint64 extensionId, const QString& treeHashHex);
     qint64 insertVersion(const VersionRow& row);
@@ -127,14 +134,15 @@ public:
     bool setSignature(qint64 versionId, const QString& signatureJson);
     bool insertFiles(qint64 versionId, const QList<FileEntry>& files);
     qint64 insertEvent(const EventRow& row);
-    bool setEventFindings(qint64 eventId, const QString& maxSeverity, const QString& findingsJson);
+    bool setEventFindings(qint64 eventId, const QString& maxSeverity, const QString& findingsJson,
+                          int findingsSchema);
     bool acknowledgeEvent(qint64 eventId, bool acknowledged);
 
     QList<BrowserRow> browsers();
     QList<ProfileRow> profilesForBrowser(qint64 browserId);
     std::optional<ProfileRow> profileById(qint64 id);
     std::optional<BrowserRow> browserById(qint64 id);
-    QList<ExtensionRow> extensionsForProfile(qint64 profileId);
+    QList<ExtensionRow> extensionsForProfile(qint64 profileId, bool presentOnly = false);
     QList<ExtensionRow> extensionsByExtId(const QString& extId);
     std::optional<ExtensionRow> extensionById(qint64 id);
     std::optional<ExtensionRow> findExtension(qint64 profileId, const QString& extId);
@@ -146,6 +154,8 @@ public:
     std::optional<EventRow> eventById(qint64 id);
     // Events with a target version whose findings were never computed (crash between scan and analysis).
     QList<EventRow> unanalyzedEvents(int limit);
+    // Analyzed events whose findings came from an older rules generation.
+    QList<EventRow> staleFindingsEvents(int findingsSchema, int limit);
     QList<EventRow> allEvents();
 
     bool insertQuarantine(const QuarantineRow& row);

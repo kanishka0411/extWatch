@@ -65,6 +65,13 @@ const QList<QStringList> kMigrations = {
                        " version TEXT, dir_name TEXT, tree_hash TEXT, original_path TEXT NOT NULL,"
                        " quarantine_path TEXT NOT NULL, created_at INTEGER NOT NULL, state TEXT NOT NULL)"),
     },
+    // 2 -> 3: presence is state, not the last event; findings carry their rules generation
+    {
+        QStringLiteral("ALTER TABLE extensions ADD COLUMN present INTEGER NOT NULL DEFAULT 1"),
+        QStringLiteral("ALTER TABLE events ADD COLUMN findings_schema INTEGER NOT NULL DEFAULT 0"),
+        QStringLiteral("UPDATE extensions SET present = 0 WHERE id IN (SELECT e.extension_id FROM events e"
+                       " WHERE e.kind = 'removed' AND e.id = (SELECT MAX(id) FROM events WHERE extension_id = e.extension_id))"),
+    },
 };
 
 std::optional<qint64> optionalInt(const QVariant& v) {
@@ -113,6 +120,7 @@ ExtensionRow readExtension(const QSqlQuery& q) {
     r.lastSeen = q.value(8).toLongLong();
     r.currentVersionId = optionalInt(q.value(9));
     r.grantsJson = q.value(10).toString();
+    r.present = q.value(11).toBool();
     return r;
 }
 
@@ -166,6 +174,7 @@ EventRow readEvent(const QSqlQuery& q) {
     r.maxSeverity = q.value(6).toString();
     r.findingsJson = q.value(7).toString();
     r.acknowledged = q.value(8).toBool();
+    r.findingsSchema = q.value(9).toInt();
     return r;
 }
 
@@ -173,7 +182,7 @@ const char* const kBrowserCols = "id, kind, user_data_dir, display_name, first_s
 const char* const kProfileCols = "id, browser_id, dir_name, display_name, first_seen, last_seen";
 const char* const kExtensionCols =
     "id, profile_id, ext_id, name, location, from_webstore, enabled, first_seen, last_seen,"
-    " current_version_id, grants_json";
+    " current_version_id, grants_json, present";
 const char* const kVersionCols =
     "id, extension_id, version, dir_name, tree_hash, first_seen, last_seen, activated_at,"
     " manifest_json, signature_json, file_count, bytes, key_matches_id, has_webstore_metadata,"
@@ -183,7 +192,7 @@ const char* const kQuarantineCols =
     " original_path, quarantine_path, created_at, state";
 const char* const kEventCols =
     "id, extension_id, kind, from_version_id, to_version_id, at, max_severity, findings_json,"
-    " acknowledged";
+    " acknowledged, findings_schema";
 
 }  // namespace
 
@@ -357,7 +366,7 @@ qint64 Database::upsertExtension(qint64 profileId, const QString& extId, const Q
         " first_seen, last_seen) VALUES(?, ?, ?, ?, ?, ?, ?, ?)"
         " ON CONFLICT(profile_id, ext_id) DO UPDATE SET name = excluded.name,"
         " location = excluded.location, from_webstore = excluded.from_webstore,"
-        " enabled = excluded.enabled, last_seen = excluded.last_seen"));
+        " enabled = excluded.enabled, last_seen = excluded.last_seen, present = 1"));
     q.addBindValue(profileId);
     q.addBindValue(extId);
     q.addBindValue(name);
@@ -476,7 +485,7 @@ qint64 Database::insertEvent(const EventRow& r) {
     QSqlQuery q(m_db);
     q.prepare(QStringLiteral(
         "INSERT INTO events(extension_id, kind, from_version_id, to_version_id, at, max_severity,"
-        " findings_json, acknowledged) VALUES(?, ?, ?, ?, ?, ?, ?, ?)"));
+        " findings_json, acknowledged, findings_schema) VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?)"));
     q.addBindValue(r.extensionId);
     q.addBindValue(r.kind);
     q.addBindValue(fromOptional(r.fromVersionId));
@@ -485,16 +494,44 @@ qint64 Database::insertEvent(const EventRow& r) {
     q.addBindValue(r.maxSeverity);
     q.addBindValue(r.findingsJson);
     q.addBindValue(r.acknowledged ? 1 : 0);
+    q.addBindValue(r.findingsSchema);
     return exec(q) ? q.lastInsertId().toLongLong() : -1;
 }
 
 bool Database::setEventFindings(qint64 eventId, const QString& maxSeverity,
-                                const QString& findingsJson) {
+                                const QString& findingsJson, int findingsSchema) {
     QSqlQuery q(m_db);
-    q.prepare(QStringLiteral("UPDATE events SET max_severity = ?, findings_json = ? WHERE id = ?"));
+    q.prepare(QStringLiteral("UPDATE events SET max_severity = ?, findings_json = ?, findings_schema = ? WHERE id = ?"));
     q.addBindValue(maxSeverity);
     q.addBindValue(findingsJson);
+    q.addBindValue(findingsSchema);
     q.addBindValue(eventId);
+    return exec(q);
+}
+
+bool Database::setExtensionPresent(qint64 extensionId, bool present) {
+    QSqlQuery q(m_db);
+    q.prepare(QStringLiteral("UPDATE extensions SET present = ? WHERE id = ?"));
+    q.addBindValue(present ? 1 : 0);
+    q.addBindValue(extensionId);
+    return exec(q);
+}
+
+QString Database::metaValue(const QString& key) {
+    QSqlQuery q(m_db);
+    q.prepare(QStringLiteral("SELECT value FROM meta WHERE key = ?"));
+    q.addBindValue(key);
+    if (exec(q) && q.next()) {
+        return q.value(0).toString();
+    }
+    return {};
+}
+
+bool Database::setMetaValue(const QString& key, const QString& value) {
+    QSqlQuery q(m_db);
+    q.prepare(QStringLiteral("INSERT INTO meta(key, value) VALUES(?, ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value"));
+    q.addBindValue(key);
+    q.addBindValue(value);
     return exec(q);
 }
 
@@ -555,11 +592,11 @@ std::optional<ProfileRow> Database::profileById(qint64 id) {
     return std::nullopt;
 }
 
-QList<ExtensionRow> Database::extensionsForProfile(qint64 profileId) {
+QList<ExtensionRow> Database::extensionsForProfile(qint64 profileId, bool presentOnly) {
     QList<ExtensionRow> out;
     QSqlQuery q(m_db);
-    q.prepare(QStringLiteral("SELECT %1 FROM extensions WHERE profile_id = ? ORDER BY name")
-                  .arg(QLatin1StringView(kExtensionCols)));
+    q.prepare(QStringLiteral("SELECT %1 FROM extensions WHERE profile_id = ?%2 ORDER BY name")
+                  .arg(QLatin1StringView(kExtensionCols), presentOnly ? QStringLiteral(" AND present = 1") : QString()));
     q.addBindValue(profileId);
     if (exec(q)) {
         while (q.next()) {
@@ -718,8 +755,25 @@ QList<EventRow> Database::unanalyzedEvents(int limit) {
     QSqlQuery q(m_db);
     q.prepare(QStringLiteral("SELECT %1 FROM events WHERE to_version_id IS NOT NULL AND"
                              " (max_severity IS NULL OR max_severity = '') AND"
-                             " kind IN ('baseline', 'updated', 'pending_version', 'modified_in_place')"
+                             " kind IN ('baseline', 'updated', 'pending_version', 'modified_in_place', 'reinstalled')"
                              " ORDER BY id LIMIT ?").arg(QLatin1StringView(kEventCols)));
+    q.addBindValue(limit);
+    if (exec(q)) {
+        while (q.next()) {
+            out.append(readEvent(q));
+        }
+    }
+    return out;
+}
+
+QList<EventRow> Database::staleFindingsEvents(int findingsSchema, int limit) {
+    QList<EventRow> out;
+    QSqlQuery q(m_db);
+    q.prepare(QStringLiteral("SELECT %1 FROM events WHERE to_version_id IS NOT NULL AND"
+                             " max_severity IS NOT NULL AND max_severity <> '' AND findings_schema <> ? AND"
+                             " kind IN ('baseline', 'updated', 'pending_version', 'modified_in_place', 'reinstalled')"
+                             " ORDER BY id DESC LIMIT ?").arg(QLatin1StringView(kEventCols)));
+    q.addBindValue(findingsSchema);
     q.addBindValue(limit);
     if (exec(q)) {
         while (q.next()) {

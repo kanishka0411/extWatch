@@ -10,6 +10,7 @@
 #include "core/discovery.h"
 #include "core/hashing.h"
 #include "core/inventory.h"
+#include "core/rules.h"
 #include "core/scanner.h"
 #include "testutil.h"
 
@@ -306,6 +307,11 @@ private slots:
             QVERIFY(q.exec(QStringLiteral("INSERT INTO profiles VALUES(1,1,'Default','Default',1,1)")));
             QVERIFY(q.exec(QStringLiteral("INSERT INTO extensions VALUES(1,1,'abcdefghijklmnopabcdefghijklmnop','Old',1,1,1,1,1,NULL)")));
             QVERIFY(q.exec(QStringLiteral("INSERT INTO versions VALUES(1,1,'1.0','1.0_0','ab',1,1,NULL,'{}','',1,1,1,1)")));
+            QVERIFY(q.exec(QStringLiteral("CREATE TABLE events(id INTEGER PRIMARY KEY, extension_id INTEGER NOT NULL, kind TEXT NOT NULL, from_version_id INTEGER, to_version_id INTEGER, at INTEGER NOT NULL, max_severity TEXT, findings_json TEXT, acknowledged INTEGER NOT NULL DEFAULT 0)")));
+            QVERIFY(q.exec(QStringLiteral("INSERT INTO extensions VALUES(2,1,'bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb','Gone',1,1,1,1,1,NULL)")));
+            QVERIFY(q.exec(QStringLiteral("INSERT INTO events(extension_id, kind, to_version_id, at, max_severity, findings_json) VALUES(1,'baseline',1,1,'low','[]')")));
+            QVERIFY(q.exec(QStringLiteral("INSERT INTO events(extension_id, kind, at) VALUES(2,'baseline',1)")));
+            QVERIFY(q.exec(QStringLiteral("INSERT INTO events(extension_id, kind, at) VALUES(2,'removed',2)")));
             old.close();
         }
         QSqlDatabase::removeDatabase(QStringLiteral("legacy"));
@@ -313,6 +319,11 @@ private slots:
         QString error;
         QVERIFY2(db.open(path, &error), qPrintable(error));
         QCOMPARE(db.schemaVersion(), Database::kSchemaVersion);
+        // Presence is derived once from the event history, then kept as state.
+        QCOMPARE(db.extensionsForProfile(1).size(), 2);
+        QCOMPARE(db.extensionsForProfile(1, /*presentOnly=*/true).size(), 1);
+        QCOMPARE(db.extensionsForProfile(1, true).first().extId, QStringLiteral("abcdefghijklmnopabcdefghijklmnop"));
+        QCOMPARE(db.staleFindingsEvents(kFindingsSchema, 10).size(), 1);  // old findings get redone
         const QList<VersionRow> versions = db.versionsForExtension(1);
         QCOMPARE(versions.size(), 1);
         QCOMPARE(versions.first().state, QStringLiteral("complete"));
@@ -328,6 +339,97 @@ private slots:
         q.state = QStringLiteral("quarantined");
         QVERIFY(db.insertQuarantine(q));
         QCOMPARE(db.quarantinesForExtension(1).size(), 1);
+    }
+
+    void reinstalledExtensionComesBack() {
+        QTemporaryDir tmp;
+        const QString userData = tmp.path() + QStringLiteral("/User Data");
+        const QString profilePath = testutil::makeFakeUserDataDir(userData, QStringLiteral("Default"), QStringLiteral("1.0.0"));
+        ScanOptions opts;
+        opts.dataDir = tmp.path() + QStringLiteral("/data");
+        opts.settleSeconds = 0;
+        opts.candidates = {{BrowserKind::Chrome, QStringLiteral("Test Chrome"), userData}};
+        runScan(opts);
+        testutil::simulateRemoval(profilePath);
+        const ScanResult gone = runScan(opts);
+        QCOMPARE(gone.events.size(), 1);
+        QCOMPARE(gone.events.first().kind, QStringLiteral("removed"));
+        {
+            Database db;
+            QString error;
+            QVERIFY2(db.open(opts.dataDir + QStringLiteral("/extwatch.sqlite"), &error), qPrintable(error));
+            const qint64 profile = db.profilesForBrowser(db.browsers().first().id).first().id;
+            QVERIFY(db.extensionsForProfile(profile, /*presentOnly=*/true).isEmpty());  // hidden from the UI and Disable targeting
+            QCOMPARE(db.extensionsForProfile(profile).size(), 1);                       // history kept
+            QVERIFY(!db.extensionsForProfile(profile).first().present);
+        }
+        // Installed again with exactly the same bytes: same version row, so nothing else changes.
+        testutil::makeFakeUserDataDir(userData, QStringLiteral("Default"), QStringLiteral("1.0.0"));
+        const ScanResult back = runScan(opts);
+        QCOMPARE(back.events.size(), 1);
+        QCOMPARE(back.events.first().kind, QStringLiteral("reinstalled"));
+        QCOMPARE(back.events.first().toVersion, QStringLiteral("1.0.0"));
+        QVERIFY2(back.events.first().summary().contains(QStringLiteral("installed again")), qPrintable(back.events.first().summary()));
+        {
+            Database db;
+            QString error;
+            QVERIFY2(db.open(opts.dataDir + QStringLiteral("/extwatch.sqlite"), &error), qPrintable(error));
+            const qint64 profile = db.profilesForBrowser(db.browsers().first().id).first().id;
+            QCOMPARE(db.extensionsForProfile(profile, /*presentOnly=*/true).size(), 1);
+        }
+        QVERIFY(runScan(opts).events.isEmpty());
+    }
+
+    void fullHashSweepEveryFourthScan() {
+        QTemporaryDir tmp;
+        const QString userData = tmp.path() + QStringLiteral("/User Data");
+        testutil::makeFakeUserDataDir(userData, QStringLiteral("Default"), QStringLiteral("1.0.0"));
+        ScanOptions opts;
+        opts.dataDir = tmp.path() + QStringLiteral("/data");
+        opts.settleSeconds = 0;
+        opts.candidates = {{BrowserKind::Chrome, QStringLiteral("Test Chrome"), userData}};
+        auto reused = [&](const ScanResult& r) { return r.browsers.first().profiles.first().extensions.first().versions.first().reused; };
+        QVERIFY(!runScan(opts).fullHash);  // scan 1: nothing known yet, everything is hashed anyway
+        QVERIFY(reused(runScan(opts)));    // 2
+        QVERIFY(reused(runScan(opts)));    // 3
+        const ScanResult fourth = runScan(opts);
+        QVERIFY(fourth.fullHash);          // 4: the shared counter forces a sweep, CLI or tray alike
+        QVERIFY(!reused(fourth));
+        QVERIFY(reused(runScan(opts)));    // 5: fingerprints trusted again
+    }
+
+    void staleFindingsAreRedone() {
+        QTemporaryDir tmp;
+        const QString userData = tmp.path() + QStringLiteral("/User Data");
+        const QString profilePath = testutil::makeFakeUserDataDir(userData, QStringLiteral("Default"), QStringLiteral("1.1.0"));
+        ScanOptions opts;
+        opts.dataDir = tmp.path() + QStringLiteral("/data");
+        opts.settleSeconds = 0;
+        opts.candidates = {{BrowserKind::Chrome, QStringLiteral("Test Chrome"), userData}};
+        runScan(opts);
+        testutil::simulateUpdate(profilePath, QStringLiteral("1.2.0"));
+        const ScanResult updated = runScan(opts);
+        QCOMPARE(updated.events.first().maxSeverity, QStringLiteral("high"));
+        const qint64 eventId = *updated.events.first().eventRowId;
+        {
+            // Pretend an older ExtWatch wrote these findings with yesterday's rules.
+            QSqlDatabase raw = QSqlDatabase::addDatabase(QStringLiteral("QSQLITE"), QStringLiteral("stale"));
+            raw.setDatabaseName(opts.dataDir + QStringLiteral("/extwatch.sqlite"));
+            QVERIFY(raw.open());
+            QSqlQuery q(raw);
+            QVERIFY(q.exec(QStringLiteral("UPDATE events SET max_severity = 'low', findings_json = '[]', findings_schema = 0 WHERE id = %1").arg(eventId)));
+            raw.close();
+        }
+        QSqlDatabase::removeDatabase(QStringLiteral("stale"));
+        runScan(opts);
+        Database db;
+        QString error;
+        QVERIFY2(db.open(opts.dataDir + QStringLiteral("/extwatch.sqlite"), &error), qPrintable(error));
+        const std::optional<EventRow> ev = db.eventById(eventId);
+        QVERIFY(ev);
+        QCOMPARE(ev->maxSeverity, QStringLiteral("high"));
+        QCOMPARE(ev->findingsSchema, kFindingsSchema);
+        QVERIFY(ev->findingsJson.size() > 2);
     }
 
     void deletedProfilesGetRemovalEvents() {

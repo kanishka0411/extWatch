@@ -17,7 +17,7 @@ today; where they disagree, the table wins.
 | Atomic snapshots | Done | Blobs first, then version and file rows in one transaction; no snapshot without its blobs |
 | Version stability gate | Done | Files newer than 3 s or a tree that changed while hashing are retried, up to twice |
 | Fingerprint reuse | Done | Unchanged trees (files, bytes, newest mtime) are not re-hashed |
-| Event kinds | Done | baseline, updated, modified_in_place (same version, different bytes), pending_version (also on first scan), enabled, disabled, removed (also for a profile the browser deleted, reconciled after every unfiltered scan) |
+| Event kinds | Done | baseline, updated, modified_in_place (same version, different bytes), pending_version (also on first scan), enabled, disabled, removed (also for a profile the browser deleted, reconciled after every unfiltered scan), reinstalled (an extension that was recorded as removed is back, even with identical bytes). Presence is a column on the extension row, not an inference from the last event |
 | Database migrations | Done | `schema_version` with ordered migrations; refuses newer databases; schema 2 today |
 | Crash recovery | Done | Events left without findings are analyzed on the next scan |
 | Behavior signatures | Done | tree-sitter facts, prettified line numbers, per-file parallel analysis on a bounded low-priority pool |
