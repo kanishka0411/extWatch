@@ -37,6 +37,10 @@ actually do, version after version, on your own machine.
 
 ## How It Works
 
+<div align="center">
+  <img src="docs/images/architecture.svg" alt="ExtWatch architecture" width="900">
+</div>
+
 1. **Discover** - find every user data directory and profile, list the extensions and read
    `Secure Preferences` for the active version and enabled state.
 2. **Snapshot** - hash every file, store new blobs in the archive, record the version and its
@@ -50,6 +54,14 @@ actually do, version after version, on your own machine.
    sentence, and a `file:line`.
 6. **Show** - a tray notification with the one-line summary, and a window with the findings, the
    manifest diff and the code diff.
+
+<div align="center">
+  <img src="docs/images/changes.png" alt="A silent update caught by ExtWatch" width="900">
+</div>
+
+<div align="center">
+  <img src="docs/images/code-diff.png" alt="Side-by-side code diff" width="900">
+</div>
 
 ## How to start it
 
