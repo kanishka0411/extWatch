@@ -24,10 +24,13 @@ struct StoreListing {
     QString traderStatus;    // "trader", "non-trader" or empty
     QString error;
     qint64 fetchedAt = 0;
+    int parserVersion = 0;  // which scraper produced these fields; the store is an unreliable sensor
 
     QJsonObject toJson() const;
     static StoreListing fromJson(const QJsonObject& o);
 };
+
+constexpr int kStoreParserVersion = 1;
 
 QUrl storeListingUrl(const QString& extId);
 StoreListing parseStoreListing(const QString& extId, const QByteArray& html, int httpStatus);

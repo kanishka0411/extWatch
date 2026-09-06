@@ -56,6 +56,38 @@ struct FakeRelay {
 class TestCompanion : public QObject {
     Q_OBJECT
 private slots:
+    void identicalProfilesAreRefused() {
+        qputenv("USER", "extwatch-companion-tie");
+        CompanionServer server;
+        QString error;
+        QVERIFY2(server.start(&error), qPrintable(error));
+        const QString ext = QStringLiteral("cjpalhdlnbpafiamejdnhcphjbkeiagm");
+        FakeRelay home, work;
+        QVERIFY(home.connectAndHello(QStringLiteral("chrome"), {ext, QStringLiteral("aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa")}));
+        QVERIFY(work.connectAndHello(QStringLiteral("chrome"), {ext, QStringLiteral("aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa")}));
+        QTRY_COMPARE_WITH_TIMEOUT(server.connectionCount(), 2, 3000);
+        CompanionServer::Target target;
+        target.browserKindId = QStringLiteral("chrome");
+        target.extId = ext;
+        target.profileExtensionIds = {ext, QStringLiteral("aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa")};
+        QTRY_VERIFY_WITH_TIMEOUT(server.describeTarget(target).contains(QStringLiteral("same extensions")), 5000);
+        bool called = false;
+        QStringList reported;
+        server.setEnabled(target, false, [&](const QStringList& ok, const QStringList& failed) {
+            called = true;
+            QVERIFY(ok.isEmpty());
+            reported = failed;
+        });
+        QTRY_VERIFY_WITH_TIMEOUT(called, 3000);
+        QVERIFY2(reported.join(u' ').contains(QStringLiteral("identical")), qPrintable(reported.join(u' ')));
+        for (FakeRelay* r : {&home, &work}) {
+            while (r->receive(100)) {
+                // No "set" request may reach either relay.
+                QVERIFY(r->buffer.isEmpty());
+            }
+        }
+    }
+
     void disableTargetsOneBrowserProfile() {
         qputenv("USER", "extwatch-companion-test");
         CompanionServer server;

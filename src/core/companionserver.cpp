@@ -194,6 +194,7 @@ double overlap(const QStringList& a, const QStringList& b) {
 CompanionServer::Connection* CompanionServer::bestMatch(const Target& target, int* candidates) const {
     Connection* best = nullptr;
     double bestScore = -1;
+    int ties = 0;
     int count = 0;
     for (Connection* c : m_connections) {
         if (!hintMatchesKind(c->browser, target.browserKindId) || !c->extensionIds.contains(target.extId)) {
@@ -204,19 +205,25 @@ CompanionServer::Connection* CompanionServer::bestMatch(const Target& target, in
         if (score > bestScore) {
             bestScore = score;
             best = c;
+            ties = 1;
+        } else if (score == bestScore) {
+            ++ties;
         }
     }
     if (candidates) {
         *candidates = count;
     }
-    return best;
+    // Two profiles with identical inventories cannot be told apart: refuse rather than guess.
+    return ties > 1 ? nullptr : best;
 }
 
 QString CompanionServer::describeTarget(const Target& target) const {
     int candidates = 0;
     const Connection* c = bestMatch(target, &candidates);
     if (!c) {
-        return QStringLiteral("no companion connected in %1 with this extension").arg(target.browserKindId);
+        return candidates > 1
+                   ? QStringLiteral("%1 %2 profiles have the same extensions; cannot tell which one you mean").arg(candidates).arg(target.browserKindId)
+                   : QStringLiteral("no companion connected in %1 with this extension").arg(target.browserKindId);
     }
     return QStringLiteral("%1 companion (%2 extensions%3)")
         .arg(c->browser.isEmpty() ? target.browserKindId : c->browser)
@@ -229,7 +236,9 @@ void CompanionServer::setEnabled(const Target& target, bool enabled, ResultHandl
     Connection* c = bestMatch(target, &candidates);
     if (!c) {
         if (done) {
-            done({}, {QStringLiteral("no companion connected in %1 with %2 installed").arg(target.browserKindId, target.extId)});
+            done({}, {candidates > 1
+                          ? QStringLiteral("%1 %2 profiles have identical extensions, so the request would be a guess; disable it in the browser instead").arg(candidates).arg(target.browserKindId)
+                          : QStringLiteral("no companion connected in %1 with %2 installed").arg(target.browserKindId, target.extId)});
         }
         return;
     }

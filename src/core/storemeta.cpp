@@ -76,6 +76,7 @@ StoreListing parseStoreListing(const QString& extId, const QByteArray& body, int
     StoreListing l;
     l.extId = extId;
     l.httpStatus = httpStatus;
+    l.parserVersion = kStoreParserVersion;
     l.fetchedAt = QDateTime::currentSecsSinceEpoch();
     const QString html = QString::fromUtf8(body);
     if (httpStatus == 404 || html.isEmpty()) {
@@ -198,6 +199,7 @@ StoreListing StoreListing::fromJson(const QJsonObject& o) {
     l.traderStatus = o.value(QStringLiteral("trader_status")).toString();
     l.error = o.value(QStringLiteral("error")).toString();
     l.fetchedAt = QDateTime::fromString(o.value(QStringLiteral("fetched_at")).toString(), Qt::ISODate).toSecsSinceEpoch();
+    l.parserVersion = o.value(QStringLiteral("parser_version")).toInt();
     return l;
 }
 
