@@ -1,0 +1,80 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  build:
+    name: ${{ matrix.name }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: macOS
+            os: macos-14
+            preset: ci-macos
+            qt_arch: clang_64
+          - name: Linux
+            os: ubuntu-22.04
+            preset: ci-linux
+            qt_arch: linux_gcc_64
+          - name: Windows
+            os: windows-2022
+            preset: ci-windows
+            qt_arch: win64_msvc2022_64
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Qt
+        uses: jurplel/install-qt-action@v4
+        with:
+          version: 6.8.3
+          arch: ${{ matrix.qt_arch }}
+          cache: true
+
+      - name: Install build tools (Linux)
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y ninja-build libgl1-mesa-dev libxkbcommon-x11-0 libxcb-cursor0 \
+            libxcb-icccm4 libxcb-image0 libxcb-keysyms1 libxcb-randr0 libxcb-render-util0 \
+            libxcb-shape0 libxcb-xinerama0 libxcb-xkb1
+
+      - name: Install build tools (macOS)
+        if: runner.os == 'macOS'
+        run: brew install ninja
+
+      - name: Configure
+        run: cmake --preset ${{ matrix.preset }}
+
+      - name: Build
+        run: cmake --build --preset ${{ matrix.preset }}
+
+      - name: Test
+        env:
+          QT_QPA_PLATFORM: offscreen
+        run: ctest --preset ${{ matrix.preset }}
+
+      - name: Smoke test CLI
+        shell: bash
+        env:
+          QT_QPA_PLATFORM: offscreen
+        run: |
+          set -euo pipefail
+          BIN=$(find build/${{ matrix.preset }} -type f \( -name extwatch -o -name extwatch.exe \) | head -n1)
+          "$BIN" --version
+          "$BIN" paths
+          "$BIN" scan --json --no-store > scan.json
+          head -c 400 scan.json
+
+      - name: Upload binary
+        uses: actions/upload-artifact@v4
+        with:
+          name: extwatch-${{ matrix.name }}
+          path: |
+            build/${{ matrix.preset }}/src/extwatch
+            build/${{ matrix.preset }}/src/Release/extwatch.exe
+          if-no-files-found: ignore
