@@ -1,0 +1,11 @@
+[Desktop Entry]
+Type=Application
+Name=ExtWatch
+GenericName=Browser extension watchdog
+Comment=Diffs your browser extensions on every silent update
+Exec=extwatch
+Icon=extwatch
+Terminal=false
+Categories=Utility;Security;
+Keywords=extension;chrome;brave;edge;security;privacy;
+StartupNotify=false
