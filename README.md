@@ -33,7 +33,7 @@ actually do, version after version, on your own machine.
 - **Catches silent updates in seconds** - a file watcher per profile, plus rescans on start and
   every 15 minutes. Versions that are downloaded but not yet running are reported first.
 - **Explains the change** - the code is parsed, reduced to a behavior signature, and diffed against
-  the previous version. Forty rules turn the difference into findings a normal person can read.
+  the previous version. Fifty-one rules turn the difference into findings a normal person can read, and anything the analyzer could not inspect is reported rather than passed off as clean.
 - **Shows the code** - side by side, prettified, highlighted, with each finding linked to its line.
 - **Lets you act** - one-click Disable through a tiny companion extension, quarantine, export,
   share a report.
@@ -84,8 +84,9 @@ exact line, prettified so a 20,000-line minified bundle diffs like source:
 
 ## Security Model
 
-ExtWatch is a read-only observer of your browser's files. It never writes to browser
-preferences and never sends data anywhere.
+Monitoring and analysis are read-only: ExtWatch never writes to browser preferences and never
+sends data anywhere. It changes browser state only when you explicitly use Disable, Quarantine or
+Restore, and each of those acts on exactly the browser profile shown on screen.
 
 ### Protected Today
 
@@ -102,7 +103,8 @@ preferences and never sends data anywhere.
 
 | Limit                | Details                                                                                                                       |
 | -------------------- | ----------------------------------------------------------------------------------------------------------------------------- |
-| Static analysis      | ExtWatch reads code, it does not run it. Heavily obfuscated loaders can hide; the obfuscation itself is flagged.               |
+| Static analysis      | ExtWatch reads code, it does not run it. Heavily obfuscated loaders can hide; the obfuscation itself is flagged, and any file it could not analyze is reported as such. |
+| Same-user malware    | Another program running as you can read the archive and talk to the companion socket. Root or a kernel compromise is out of scope. See [docs/THREAT_MODEL.md](docs/THREAT_MODEL.md). |
 | Disable needs help   | Browsers refuse `chrome://` links from other apps and protect their preferences, so one-click Disable goes through the companion extension. Without it, Quarantine moves the files so the browser refuses to run them. |
 | Unsigned builds      | Until certificates are added, Gatekeeper and SmartScreen warn once. Signing and notarization are wired into the release workflow. |
 | First scan cost      | The first run analyzes every extension once. With a 44 MB wallet extension installed that takes about 40 seconds in the background; later scans take about a second. |

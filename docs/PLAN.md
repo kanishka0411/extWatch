@@ -4,40 +4,40 @@ Written 2026-09-05. Target: v1 in 5 weeks. Source idea: `~/Desktop/openSource/PR
 
 ExtWatch is a desktop tray app that snapshots every extension installed in Chrome-family browsers, catches the silent version swap with a file watcher, and shows a prettified manifest and code diff that highlights new host permissions, new fetch domains and remote-payload loaders. It keeps a local archive of every version it has seen and can produce a shareable, reproducible report. It never phones home.
 
-## Status (2026-09-06)
+## Status (2026-09-06, after review)
 
-Kanishka asked for v1 to be built in one day, then for the remaining items the next morning.
-What exists and is verified:
+The sections below are the original design. This table is the truth about what the code does
+today; where they disagree, the table wins.
 
-- Core, analysis, CLI, tray app and desktop UI as described in sections 4 to 8, all in C++20/Qt 6.
-  Nine Qt Test suites pass on macOS; the CLI was exercised against the real Chrome and Brave
-  profiles on this Mac (22 extensions, 5 profiles) and against the fixture profile with a
-  simulated silent update.
-- **Companion extension (Disable tier 1) is implemented**: `companion/` (MV3, `management` +
-  `nativeMessaging`), the native messaging host mode of the `extwatch` binary (detected by the
-  `chrome-extension://` origin argument), host manifest registration for every browser, a local
-  socket server in the tray app, the Disable/Enable button and a setup dialog. The relay is covered
-  by an integration test that drives the real binary; the last mile (loading the unpacked companion
-  in a browser) is a user action and was not exercised here.
-- **Web Store publisher tracking (opt-in)** is implemented: listing parser (label based), daily
-  tracker with `publisher_changed` and `removed_from_store` events, `extwatch store <id>`.
-  Verified live against uBlock Origin Lite and an unknown ID.
-- **Packaging**: `packaging/macos/build-dmg.sh` (built and verified locally, ad-hoc signed;
-  Developer ID signing and notarization run when `CODESIGN_IDENTITY`/`NOTARY_PROFILE` are set),
-  `packaging/windows/build-installer.ps1` + Inno Setup script (not executed here, no Windows
-  machine), `packaging/linux/build-appimage.sh` and a Debian trixie Docker build
-  (`packaging/linux/docker-build.sh`): the full project compiles on Linux (Qt 6.8, arm64) and all
-  nine test suites pass there.
-  `.github/workflows/release.yml` builds all three on a `v*` tag.
-- Performance: a first scan analyzes every installed extension once; with a 44 MiB wallet
-  extension installed that takes about 40 s in the background thread. Later scans reuse stored
-  signatures and take about a second. Analysis runs per file in parallel.
-- Not done: Windows has not been built or run (no machine); CI has not run because the repository
-  has no remote yet; no code-signing certificates were available, so shipped builds are unsigned.
-- Deviations from the plan: baseline findings are shown as the extension's "risk profile" in the
-  UI (not notified); `chrome://` deep links are replaced by a copy-to-clipboard button because
-  Chromium rejects them from the command line (verified in `url_util.cc`); "not found" on the Web
-  Store is a redirect to a generic page, not a 404.
+| Capability | Status | Notes |
+| --- | --- | --- |
+| Discovery of Chrome-family browsers and profiles | Done | Built-in components are filtered by location, known ID and browser install path |
+| Startup, periodic and watcher-triggered rescans | Done | Watcher armed from discovery at startup; a change during a scan queues a rescan |
+| Content-addressed archive | Done | Blobs are hashed while copied and refused if the file changed meanwhile; 0600/0700 permissions |
+| Atomic snapshots | Done | Blobs first, then version and file rows in one transaction; no snapshot without its blobs |
+| Version stability gate | Done | Files newer than 3 s or a tree that changed while hashing are retried, up to twice |
+| Fingerprint reuse | Done | Unchanged trees (files, bytes, newest mtime) are not re-hashed |
+| Event kinds | Done | baseline, updated, modified_in_place (same version, different bytes), pending_version (also on first scan), enabled, disabled, removed |
+| Database migrations | Done | `schema_version` with ordered migrations; refuses newer databases; schema 2 today |
+| Crash recovery | Done | Events left without findings are analyzed on the next scan |
+| Behavior signatures | Done | tree-sitter facts, prettified line numbers, per-file parallel analysis on a bounded low-priority pool |
+| Rules | Done | 51 rules; sink identity is (kind, file); content scripts compared per declaration; DNR header operations, redirects and allowAllRequests; `world: MAIN`, `match_origin_as_fallback`, `externally_connectable.ids` |
+| Evasions handled | Partial | `(0, eval)`, `globalThis["eval"]`, `Function(x)()`, `browser.*`, named period constants, `chrome.alarms`; no taint or control-flow analysis |
+| Incomplete analysis is reported | Done | Files above 48 MiB, nesting above 400 levels, refused archive entries, parse errors produce `analysis.incomplete` |
+| Package limits | Done | 512 MiB archive, 20,000 entries, 128 MiB per entry, 1 GiB total, 200x ratio; non-code entries are never inflated |
+| WebAssembly, invisible characters | Done | Listed and flagged; wasm contents not analyzed |
+| Side-by-side diff | Done | Line hashes are verified, never trusted alone |
+| Quarantine and restore | Done | Recorded per browser profile with a random id; verified moves; restore goes to the original path only |
+| Companion one-click Disable | Done | Targets one browser profile (browser kind plus inventory); origin validated; no uninstall command |
+| Single instance | Done | Lock file per archive |
+| Web Store publisher tracking | Done (opt-in) | Scraped labels, treated as a sensor; `parser_version` recorded |
+| `doctor` | Done | SQLite check, blob presence and optional re-hash, orphan count, quarantines, companion integrity, permissions |
+| Snapshot addressing in the CLI | Done | `1.2.0`, `1.2.0@<hash prefix>`, `@<hash prefix>` |
+| Supply chain | Done | Dependencies and actions pinned to commits, linuxdeploy pinned with checksums, releases gated on the test matrix, `SHA256SUMS` attached |
+| Signing and notarization | Needs certificates | Wired in the workflow |
+| CRX signature verification, Web Store `verified_contents` check | Planned | Would prove local files are the store's files |
+| Separate analyzer process | Planned | Today the analyzer runs in-process with limits |
+| Per-blob analysis cache, taint analysis, effective-permission events, Firefox | Planned | |
 
 ## 1. What "v1 done" means
 
