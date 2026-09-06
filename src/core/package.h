@@ -1,0 +1,20 @@
+#pragma once
+
+#include <QList>
+#include <QString>
+
+#include "core/signature.h"
+
+namespace extwatch {
+
+// Loads an extension from a directory, a .zip, or a .crx (CRX2 and CRX3 containers).
+// Zip entries below a single top-level folder are flattened so manifest.json sits at the root.
+QList<SourceFile> loadSourcesFromPackage(const QString& path, QString* error = nullptr);
+
+// Writes the given files into a zip archive.
+bool writeZip(const QString& zipPath, const QList<SourceFile>& files, QString* error = nullptr);
+
+// Offset of the zip payload inside a CRX file, or -1 when the data is not a CRX.
+qint64 crxZipOffset(const QByteArray& data);
+
+}  // namespace extwatch
