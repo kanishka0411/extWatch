@@ -206,38 +206,6 @@ Settings → **Set up companion extension** registers the native messaging host 
 on the machine (no admin) and opens the folder. Load it unpacked from `chrome://extensions` with
 Developer mode on. Monitoring stays outside the browser; only the switch lives inside it.
 
-## Roadmap
-
-### V1
-
-- [x] Discovery across Chrome-family browsers and profiles
-- [x] Content-addressed archive and event history
-- [x] File-system watcher with startup and periodic rescans
-- [x] Behavior signatures, forty rules, prettified side-by-side diff
-- [x] Tray app, window, HTML reports, CLI with JSON
-- [x] Companion extension for one-click Disable
-- [x] Opt-in Web Store publisher tracking
-- [x] macOS dmg, Windows installer, Linux AppImage, CI on all three
-- [ ] Signed and notarized releases
-- [ ] Companion published on the Web Store
-
-### Later
-
-- [ ] Firefox (`extensions.json`, XPI archives)
-- [ ] Web Store signature verification from `_metadata/verified_contents.json`
-- [ ] Team mode that merges `scan --json` from many machines
-- [ ] Public behavior-signature dataset from a 30-day watch of popular extensions
-
-The full plan and the decisions behind it are in [docs/PLAN.md](docs/PLAN.md); the signature
-format is in [docs/signature-schema.md](docs/signature-schema.md).
-
-## Related Work
-
-[ext-watcher](https://github.com/ading2210/ext-watcher) watches the Web Store for IDs you list
-and posts diffs to Discord. crx-analyzer looks at one package at a time. Chrome re-prompts when an
-extension asks for more permissions but never shows you the code. None of them look at what is
-actually installed on your machine, version after version, and explain the change.
-
 ## License
 
-MIT. Qt under the LGPLv3 with dynamic linking; tree-sitter (MIT), dtl (BSD), miniz (MIT).
+MIT. See [LICENSE](LICENSE); third-party components are listed in [THIRD_PARTY.md](THIRD_PARTY.md).
