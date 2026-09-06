@@ -1,0 +1,246 @@
+{
+    "extwatch": "0.1.0",
+    "rules": [
+        {
+            "explanation": "A new <all_urls> or *://*/* host pattern lets the extension read and change every page you visit.",
+            "id": "host.all_urls",
+            "severity": "high",
+            "title": "Gains access to every website"
+        },
+        {
+            "explanation": "A periodic timer and a network call to a new domain in the same file: the extension keeps asking a server what to do.",
+            "id": "network.poller",
+            "severity": "high",
+            "title": "Polls a server on a timer"
+        },
+        {
+            "explanation": "New host patterns were added to host_permissions or content script matches.",
+            "id": "host.broadened",
+            "severity": "medium",
+            "title": "Gains access to more websites"
+        },
+        {
+            "explanation": "Content scripts now match more URLs, run in all frames, or run before the page loads.",
+            "id": "content_scripts.broadened",
+            "severity": "medium",
+            "title": "Injects code into more pages or frames"
+        },
+        {
+            "explanation": "APIs such as cookies, history, webRequest, tabs, scripting, debugger or nativeMessaging expose browsing data or code execution.",
+            "id": "permission.sensitive",
+            "severity": "medium",
+            "title": "Requests a sensitive browser API"
+        },
+        {
+            "explanation": "A new API permission that is not in the sensitive set.",
+            "id": "permission.added",
+            "severity": "low",
+            "title": "Requests a new browser API"
+        },
+        {
+            "explanation": "eval, new Function or a timer with a string body can run code that is not in the shipped files.",
+            "id": "remote_code.eval",
+            "severity": "high",
+            "title": "Executes dynamically built code"
+        },
+        {
+            "explanation": "Setting an on* attribute to a string runs that string as JavaScript. Used by QuickLens to run server-supplied code on every page.",
+            "id": "remote_code.attribute_exec",
+            "severity": "high",
+            "title": "Executes code through an event-handler attribute"
+        },
+        {
+            "explanation": "importScripts with a remote URL pulls executable code from outside the package.",
+            "id": "remote_code.import_scripts",
+            "severity": "high",
+            "title": "Loads scripts from a remote server"
+        },
+        {
+            "explanation": "importScripts is called with a non-literal argument.",
+            "id": "remote_code.import_scripts_dynamic",
+            "severity": "medium",
+            "title": "Loads scripts from a computed location"
+        },
+        {
+            "explanation": "A <script src=\"https://...\"> in an extension page executes code from a server.",
+            "id": "remote_code.html_script",
+            "severity": "high",
+            "title": "Extension page loads a remote script"
+        },
+        {
+            "explanation": "javascript: URLs execute their content.",
+            "id": "remote_code.javascript_url",
+            "severity": "high",
+            "title": "Navigates to a javascript: URL"
+        },
+        {
+            "explanation": "The same file reads chrome.storage and executes strings, the pattern of a payload cached from a remote server.",
+            "id": "remote_code.storage_to_exec",
+            "severity": "high",
+            "title": "Runs code that was fetched into storage"
+        },
+        {
+            "explanation": "A network endpoint that earlier versions did not contact.",
+            "id": "network.domain",
+            "severity": "medium",
+            "title": "Talks to a new domain"
+        },
+        {
+            "explanation": "The domain is common infrastructure (Google, GitHub, a public CDN, or the extension's own homepage).",
+            "id": "network.domain_known",
+            "severity": "low",
+            "title": "Talks to a new well-known domain"
+        },
+        {
+            "explanation": "The host of a request is computed, so it cannot be read from the code.",
+            "id": "network.dynamic_url",
+            "severity": "low",
+            "title": "Builds request URLs at runtime"
+        },
+        {
+            "explanation": "A declarativeNetRequest rule or webRequest listener removes or rewrites Content-Security-Policy, X-Frame-Options or similar headers, disabling the protections of every site.",
+            "id": "headers.strip_security",
+            "severity": "high",
+            "title": "Removes security headers from web pages"
+        },
+        {
+            "explanation": "Dynamic declarativeNetRequest rules or webRequest header listeners can rewrite traffic in ways not visible in the package.",
+            "id": "headers.dynamic_rules",
+            "severity": "medium",
+            "title": "Changes network rules at runtime"
+        },
+        {
+            "explanation": "chrome.scripting.executeScript or tabs.executeScript runs code in web pages on demand.",
+            "id": "scripting.execute",
+            "severity": "medium",
+            "title": "Injects scripts into tabs programmatically"
+        },
+        {
+            "explanation": "Native messaging bridges the extension to a program on the computer.",
+            "id": "native_messaging",
+            "severity": "medium",
+            "title": "Talks to a native program"
+        },
+        {
+            "explanation": "document.createElement('script') is how remote code is injected into pages.",
+            "id": "dom.script_element",
+            "severity": "medium",
+            "title": "Creates script elements"
+        },
+        {
+            "explanation": "Sources set from variables can point anywhere.",
+            "id": "dom.dynamic_src",
+            "severity": "low",
+            "title": "Assigns computed URLs to src attributes"
+        },
+        {
+            "explanation": "Injected frames can load third-party pages inside sites.",
+            "id": "dom.iframe_element",
+            "severity": "low",
+            "title": "Creates iframes"
+        },
+        {
+            "explanation": "innerHTML with computed content can inject markup and scripts.",
+            "id": "dom.inner_html",
+            "severity": "low",
+            "title": "Writes HTML from variables"
+        },
+        {
+            "explanation": "keydown, keypress, input or paste listeners in a content script can capture what you type.",
+            "id": "content_script.keystrokes",
+            "severity": "medium",
+            "title": "Content script listens to keystrokes or form input"
+        },
+        {
+            "explanation": "New submit, change, copy or unload listeners in a content script.",
+            "id": "content_script.listeners",
+            "severity": "low",
+            "title": "Content script listens to page events"
+        },
+        {
+            "explanation": "Language, time zone, user agent or screen size are read; combined with a new server this is targeting logic.",
+            "id": "fingerprinting",
+            "severity": "low",
+            "title": "Collects device fingerprint details"
+        },
+        {
+            "explanation": "externally_connectable now lets pages send messages to the extension, turning it into a bridge for those sites.",
+            "id": "externally_connectable.widened",
+            "severity": "high",
+            "title": "Websites can message the extension"
+        },
+        {
+            "explanation": "unsafe-eval, wasm-unsafe-eval or remote sources were added to the extension CSP.",
+            "id": "csp.loosened",
+            "severity": "medium",
+            "title": "Weakens its own content security policy"
+        },
+        {
+            "explanation": "The update URL moved away from the store, so future versions come from elsewhere.",
+            "id": "update_url.changed",
+            "severity": "high",
+            "title": "Updates from a different server"
+        },
+        {
+            "explanation": "A different key means a different publisher signed this version.",
+            "id": "key.changed",
+            "severity": "high",
+            "title": "Signing key changed"
+        },
+        {
+            "explanation": "The key in manifest.json does not derive to the extension ID; the files were tampered with or sideloaded.",
+            "id": "key.mismatch",
+            "severity": "high",
+            "title": "Files were not signed for this ID"
+        },
+        {
+            "explanation": "Long encoded strings, hex escapes, atob/fromCharCode or _0x identifiers appeared.",
+            "id": "obfuscation.increased",
+            "severity": "medium",
+            "title": "Code became obfuscated"
+        },
+        {
+            "explanation": "New static declarativeNetRequest rules.",
+            "id": "dnr.rules_added",
+            "severity": "low",
+            "title": "Adds network rules"
+        },
+        {
+            "explanation": "web_accessible_resources changed; pages can load these files.",
+            "id": "web_accessible_resources.changed",
+            "severity": "low",
+            "title": "Exposes resources to websites"
+        },
+        {
+            "explanation": "Total code size grew or shrank by more than half.",
+            "id": "size.large_change",
+            "severity": "low",
+            "title": "Package size changed a lot"
+        },
+        {
+            "explanation": "New or deleted files in the package.",
+            "id": "files.changed",
+            "severity": "info",
+            "title": "Files added or removed"
+        },
+        {
+            "explanation": "The extension presents itself under a different name.",
+            "id": "manifest.name_changed",
+            "severity": "low",
+            "title": "Name changed"
+        },
+        {
+            "explanation": "Routine version bump.",
+            "id": "manifest.version",
+            "severity": "info",
+            "title": "Version changed"
+        },
+        {
+            "explanation": "Description, icons, background or other fields changed.",
+            "id": "manifest.changed",
+            "severity": "info",
+            "title": "Manifest fields changed"
+        }
+    ],
+    "schema": 1
+}
