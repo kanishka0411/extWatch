@@ -1,0 +1,4 @@
+#pragma once
+
+#define EXTWATCH_VERSION "@PROJECT_VERSION@"
+#define EXTWATCH_SCHEMA_VERSION 1
