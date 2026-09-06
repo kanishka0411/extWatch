@@ -5,20 +5,17 @@ set(FETCHCONTENT_QUIET OFF)
 
 FetchContent_Declare(tree_sitter
     GIT_REPOSITORY https://github.com/tree-sitter/tree-sitter.git
-    GIT_TAG        v0.26.13
-    GIT_SHALLOW    TRUE
+    GIT_TAG        d97971e24500218865c05ed1febdee2acf41bae1  # v0.26.13
     SOURCE_SUBDIR  .cmake-disabled)   # never add_subdirectory: we compile lib.c ourselves
 
 FetchContent_Declare(tree_sitter_javascript
     GIT_REPOSITORY https://github.com/tree-sitter/tree-sitter-javascript.git
-    GIT_TAG        v0.25.0
-    GIT_SHALLOW    TRUE
+    GIT_TAG        f76aea6aa47322ea5c208c9c2e67f4a350d554f3  # v0.25.0
     SOURCE_SUBDIR  .cmake-disabled)
 
 FetchContent_Declare(dtl
     GIT_REPOSITORY https://github.com/cubicdaiya/dtl.git
-    GIT_TAG        v1.21
-    GIT_SHALLOW    TRUE
+    GIT_TAG        32567bb9ec704f09040fb1ed7431a3d967e3df03  # v1.21
     SOURCE_SUBDIR  .cmake-disabled)
 
 FetchContent_MakeAvailable(tree_sitter tree_sitter_javascript dtl)

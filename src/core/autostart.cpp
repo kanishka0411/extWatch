@@ -88,9 +88,14 @@ bool setAutostartEnabled(bool enabled, QString* error) {
         if (error) *error = f.errorString();
         return false;
     }
+    // Desktop-entry Exec values must be quoted and have backslashes, quotes and $ escaped.
+    QString exec = executablePath();
+    exec.replace(u'\\', QStringLiteral("\\\\"));
+    exec.replace(u'"', QStringLiteral("\\\""));
+    exec.replace(u'$', QStringLiteral("\\$"));
     f.write(QStringLiteral("[Desktop Entry]\nType=Application\nName=ExtWatch\nComment=Watches browser extensions for silent updates\n"
-                           "Exec=%1\nIcon=extwatch\nTerminal=false\nX-GNOME-Autostart-enabled=true\n")
-                .arg(executablePath())
+                           "Exec=\"%1\"\nIcon=extwatch\nTerminal=false\nX-GNOME-Autostart-enabled=true\n")
+                .arg(exec)
                 .toUtf8());
     return true;
 #endif
