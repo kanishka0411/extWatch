@@ -75,8 +75,16 @@ cmake --build --preset dev-mac
 ./build/dev-mac/src/extwatch --show
 ```
 
+To run it from anywhere as plain `extwatch`, install it once:
+
+```bash
+sudo cmake --install build/dev-mac
+extwatch --show
+```
+
 It sits in the tray. The first scan records every extension as a baseline; after that you only
 hear about changes. The same binary is the command line: `extwatch --help`.
+`packaging/macos/build-dmg.sh` builds a normal `ExtWatch.app` you can drag into Applications.
 
 ## License
 
