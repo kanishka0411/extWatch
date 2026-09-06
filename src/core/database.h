@@ -39,6 +39,7 @@ struct ExtensionRow {
     qint64 firstSeen = 0;
     qint64 lastSeen = 0;
     std::optional<qint64> currentVersionId;
+    QString grantsJson;  // effective host/API grants from the browser prefs
 };
 
 struct VersionRow {
@@ -56,6 +57,24 @@ struct VersionRow {
     qint64 bytes = 0;
     bool keyMatchesId = true;
     bool hasWebstoreMetadata = false;
+    QString statFingerprint;  // directoryFingerprint() when this tree was last seen on disk
+    QString state;            // "complete"; snapshots are only recorded once every blob is stored
+};
+
+struct QuarantineRow {
+    QString id;  // random, also the directory name under <dataDir>/quarantine/
+    qint64 extensionId = 0;
+    QString extId;
+    QString browserKind;
+    QString userDataDir;
+    QString profileDir;
+    QString version;
+    QString dirName;
+    QString treeHash;
+    QString originalPath;
+    QString quarantinePath;
+    qint64 createdAt = 0;
+    QString state;  // quarantined, copied_source_present, restored
 };
 
 struct EventRow {
@@ -74,6 +93,8 @@ struct EventRow {
 // thread-affine); instances are cheap to create.
 class Database {
 public:
+    static constexpr int kSchemaVersion = 2;
+
     Database();
     ~Database();
     Database(const Database&) = delete;
@@ -81,6 +102,8 @@ public:
 
     bool open(const QString& filePath, QString* error = nullptr);
     bool isOpen() const { return m_db.isOpen(); }
+    int schemaVersion();
+    bool quickCheck(QString* report = nullptr);
     QString filePath() const { return m_filePath; }
     QString lastError() const { return m_lastError; }
 
@@ -95,10 +118,12 @@ public:
     qint64 upsertExtension(qint64 profileId, const QString& extId, const QString& name,
                            int location, bool fromWebstore, bool enabled, qint64 now);
     bool setCurrentVersion(qint64 extensionId, std::optional<qint64> versionId);
+    bool setExtensionGrants(qint64 extensionId, const QString& grantsJson);
 
     std::optional<qint64> findVersionByTreeHash(qint64 extensionId, const QString& treeHashHex);
     qint64 insertVersion(const VersionRow& row);
     bool touchVersion(qint64 versionId, qint64 now, bool activated);
+    bool setVersionFingerprint(qint64 versionId, const QString& fingerprint);
     bool setSignature(qint64 versionId, const QString& signatureJson);
     bool insertFiles(qint64 versionId, const QList<FileEntry>& files);
     qint64 insertEvent(const EventRow& row);
@@ -119,6 +144,16 @@ public:
     QList<EventRow> eventsForExtension(qint64 extensionId);
     QList<EventRow> recentEvents(int limit, bool unacknowledgedOnly = false);
     std::optional<EventRow> eventById(qint64 id);
+    // Events with a target version whose findings were never computed (crash between scan and analysis).
+    QList<EventRow> unanalyzedEvents(int limit);
+    QList<EventRow> allEvents();
+
+    bool insertQuarantine(const QuarantineRow& row);
+    bool setQuarantineState(const QString& id, const QString& state);
+    std::optional<QuarantineRow> quarantineById(const QString& id);
+    QList<QuarantineRow> quarantinesForExtension(qint64 extensionId);
+    QList<QuarantineRow> allQuarantines();
+    QList<VersionRow> allVersions();
 
     bool upsertStoreListing(const StoreListing& listing);
     std::optional<StoreListing> storeListing(const QString& extId);

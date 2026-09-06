@@ -3,6 +3,7 @@
 #include <QCryptographicHash>
 #include <QDir>
 #include <QDirIterator>
+#include <QDateTime>
 #include <QFile>
 #include <algorithm>
 
@@ -28,6 +29,21 @@ QString toHex(const QByteArray& bytes) {
     return QString::fromLatin1(bytes.toHex());
 }
 
+QString directoryFingerprint(const QString& rootDir) {
+    qint64 files = 0;
+    qint64 bytes = 0;
+    qint64 newest = 0;
+    QDirIterator it(rootDir, QDir::Files | QDir::Hidden | QDir::NoSymLinks | QDir::NoDotAndDotDot,
+                    QDirIterator::Subdirectories);
+    while (it.hasNext()) {
+        const QFileInfo fi = it.nextFileInfo();
+        ++files;
+        bytes += fi.size();
+        newest = qMax(newest, fi.lastModified().toMSecsSinceEpoch());
+    }
+    return QStringLiteral("%1:%2:%3").arg(files).arg(bytes).arg(newest);
+}
+
 TreeSnapshot hashTree(const QString& rootDir) {
     TreeSnapshot snap;
     const QDir root(rootDir);
@@ -43,6 +59,7 @@ TreeSnapshot hashTree(const QString& rootDir) {
         }
         snap.files.append({root.relativeFilePath(fi.filePath()), sha, fi.size()});
         snap.totalBytes += fi.size();
+        snap.newestMtimeMs = qMax(snap.newestMtimeMs, fi.lastModified().toMSecsSinceEpoch());
     }
     std::sort(snap.files.begin(), snap.files.end(), [](const FileEntry& a, const FileEntry& b) {
         return a.relPath.toUtf8() < b.relPath.toUtf8();

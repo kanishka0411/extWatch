@@ -1,7 +1,9 @@
 #include "core/scanner.h"
 
 #include <QDir>
+#include <QFile>
 #include <QJsonArray>
+#include <QThread>
 #include <QJsonDocument>
 
 #include "core/blobstore.h"
@@ -51,6 +53,8 @@ QString ScanEvent::summary() const {
         base = QStringLiteral("%1 %2 recorded as baseline").arg(extName, toVersion);
     } else if (kind == QStringLiteral("updated")) {
         base = QStringLiteral("%1 updated %2 → %3").arg(extName, fromVersion, toVersion);
+    } else if (kind == QStringLiteral("modified_in_place")) {
+        base = QStringLiteral("%1 %2: installed files changed without a version change").arg(extName, toVersion);
     } else if (kind == QStringLiteral("pending_version")) {
         base = QStringLiteral("%1 %2 downloaded, activates when idle").arg(extName, toVersion);
     } else if (kind == QStringLiteral("enabled")) {
@@ -99,6 +103,7 @@ QJsonObject versionToJson(const VersionReport& v) {
     o.insert(QStringLiteral("path"), v.path);
     o.insert(QStringLiteral("active"), v.active);
     o.insert(QStringLiteral("newly_seen"), v.newlySeen);
+    o.insert(QStringLiteral("settled"), v.settled);
     if (!v.treeHash.isEmpty()) {
         o.insert(QStringLiteral("tree_hash"), QStringLiteral("sha256:") + v.treeHash);
     }
@@ -167,6 +172,7 @@ struct PersistContext {
     Database* db = nullptr;
     BlobStore* blobs = nullptr;
     qint64 now = 0;
+    bool needsRescan = false;
 };
 
 // Records one extension of one profile into the database and turns differences against the
@@ -223,6 +229,11 @@ void persistExtension(PersistContext& ctx, qint64 profileId, const InstalledExte
         if (vr.treeHash.isEmpty()) {
             continue;  // hashing disabled: nothing to archive
         }
+        if (!vr.settled) {
+            report.notes.append(QStringLiteral("%1 is still being written; will retry").arg(vr.dirName));
+            ctx.needsRescan = true;
+            continue;
+        }
         std::optional<qint64> versionId = db.findVersionByTreeHash(extensionId, vr.treeHash);
         if (!versionId) {
             const VersionDir* vd = nullptr;
@@ -231,6 +242,24 @@ void persistExtension(PersistContext& ctx, qint64 profileId, const InstalledExte
                     vd = &candidate;
                 }
             }
+            // 1. Archive every blob first; a file that changed since it was hashed is rejected.
+            bool archived = vd != nullptr;
+            if (vd) {
+                for (const FileEntry& f : vr.files) {
+                    QString err;
+                    if (!ctx.blobs->put(vd->path + u'/' + f.relPath, f.sha256, &err)) {
+                        vr.warnings.append(err);
+                        archived = false;
+                        break;
+                    }
+                }
+            }
+            if (!archived) {
+                report.notes.append(QStringLiteral("%1 could not be archived completely; will retry").arg(vr.dirName));
+                ctx.needsRescan = true;
+                continue;
+            }
+            // 2. Record the snapshot in one transaction.
             VersionRow row;
             row.extensionId = extensionId;
             row.version = vr.version;
@@ -246,24 +275,26 @@ void persistExtension(PersistContext& ctx, qint64 profileId, const InstalledExte
             row.bytes = vr.bytes;
             row.keyMatchesId = vr.keyMatchesId;
             row.hasWebstoreMetadata = vr.hasWebstoreMetadata;
-            const qint64 id = db.insertVersion(row);
-            if (id < 0) {
+            row.statFingerprint = vr.fingerprint;
+            row.state = QStringLiteral("complete");
+            if (!db.transaction()) {
                 vr.warnings.append(QStringLiteral("database error: %1").arg(db.lastError()));
+                continue;
+            }
+            const qint64 id = db.insertVersion(row);
+            if (id < 0 || !db.insertFiles(id, vr.files) || !db.commit()) {
+                db.rollback();
+                vr.warnings.append(QStringLiteral("database error: %1").arg(db.lastError()));
+                ctx.needsRescan = true;
                 continue;
             }
             versionId = id;
             vr.newlySeen = true;
-            if (vd) {
-                db.insertFiles(id, vr.files);
-                for (const FileEntry& f : vr.files) {
-                    QString err;
-                    if (!ctx.blobs->put(vd->path + u'/' + f.relPath, f.sha256, &err)) {
-                        vr.warnings.append(err);
-                    }
-                }
-            }
         } else {
             db.touchVersion(*versionId, ctx.now, vr.active);
+            if (!vr.fingerprint.isEmpty()) {
+                db.setVersionFingerprint(*versionId, vr.fingerprint);
+            }
         }
         vr.versionRowId = versionId;
 
@@ -275,7 +306,10 @@ void persistExtension(PersistContext& ctx, qint64 profileId, const InstalledExte
                 storeEvent(ev);
                 db.setCurrentVersion(extensionId, versionId);
             } else if (*previousCurrent != *versionId) {
-                ScanEvent ev = makeEvent(QStringLiteral("updated"));
+                // Same version string but different bytes is its own kind of event: nothing was
+                // "updated", the installed files changed underneath the browser.
+                const bool sameVersion = previousVersion == vr.version;
+                ScanEvent ev = makeEvent(sameVersion ? QStringLiteral("modified_in_place") : QStringLiteral("updated"));
                 ev.fromVersion = previousVersion;
                 ev.toVersion = vr.version;
                 ev.fromVersionRowId = previousCurrent;
@@ -283,8 +317,8 @@ void persistExtension(PersistContext& ctx, qint64 profileId, const InstalledExte
                 storeEvent(ev);
                 db.setCurrentVersion(extensionId, versionId);
             }
-        } else if (vr.newlySeen && previousCurrent &&
-                   compareVersions(vr.version, activeVersion) > 0) {
+        } else if (vr.newlySeen && compareVersions(vr.version, activeVersion) > 0) {
+            // Downloaded but not yet activated, also on the very first scan.
             ScanEvent ev = makeEvent(QStringLiteral("pending_version"));
             ev.fromVersion = activeVersion;
             ev.toVersion = vr.version;
@@ -340,7 +374,8 @@ void recordRemovals(PersistContext& ctx, qint64 profileId, const BrowserReport& 
     }
 }
 
-ExtensionReport buildReport(const InstalledExtension& ext, bool computeHashes) {
+ExtensionReport buildReport(const InstalledExtension& ext, bool computeHashes, int settleSeconds,
+                            const QHash<QString, VersionRow>& knownByDir) {
     ExtensionReport r;
     r.id = ext.id;
     r.name = ext.displayName();
@@ -361,6 +396,7 @@ ExtensionReport buildReport(const InstalledExtension& ext, bool computeHashes) {
             r.updateTime = chromeTimeToDateTime(*ext.record->lastUpdateTime);
         }
     }
+    const qint64 nowMs = QDateTime::currentMSecsSinceEpoch();
     for (const VersionDir& vd : ext.versions) {
         VersionReport vr;
         vr.dirName = vd.dirName;
@@ -377,12 +413,31 @@ ExtensionReport buildReport(const InstalledExtension& ext, bool computeHashes) {
             r.updateUrl = vd.manifest.updateUrl;
         }
         if (computeHashes) {
-            const TreeSnapshot snap = hashTree(vd.path);
-            vr.treeHash = toHex(snap.treeHash);
-            vr.fileCount = static_cast<int>(snap.files.size());
-            vr.bytes = snap.totalBytes;
-            vr.warnings += snap.warnings;
-            vr.files = snap.files;
+            vr.fingerprint = directoryFingerprint(vd.path);
+            const auto known = knownByDir.constFind(vd.dirName);
+            if (known != knownByDir.constEnd() && !known->statFingerprint.isEmpty() &&
+                known->statFingerprint == vr.fingerprint) {
+                // Nothing on disk changed since this tree was archived: skip the hashing.
+                vr.treeHash = known->treeHash;
+                vr.fileCount = known->fileCount;
+                vr.bytes = known->bytes;
+                vr.reused = true;
+            } else {
+                const TreeSnapshot snap = hashTree(vd.path);
+                vr.treeHash = toHex(snap.treeHash);
+                vr.fileCount = static_cast<int>(snap.files.size());
+                vr.bytes = snap.totalBytes;
+                vr.warnings += snap.warnings;
+                vr.files = snap.files;
+                // A directory the browser is still writing must not be archived yet: files newer
+                // than the settle window, or a tree that changed while it was being hashed.
+                const bool recentlyWritten = nowMs - snap.newestMtimeMs < qint64(settleSeconds) * 1000;
+                const bool changedMeanwhile = directoryFingerprint(vd.path) != vr.fingerprint;
+                vr.settled = vd.manifest.valid && !recentlyWritten && !changedMeanwhile;
+                if (changedMeanwhile) {
+                    vr.fingerprint = QString();  // do not record a fingerprint we know is stale
+                }
+            }
         }
         r.versions.append(vr);
     }
@@ -407,6 +462,9 @@ ScanResult runScan(const ScanOptions& options) {
         if (!db.open(databasePath(dataDir), &err)) {
             result.warnings.append(QStringLiteral("cannot open database: %1").arg(err));
         } else {
+            // The archive holds copies of other people's code and your browsing setup: keep it private.
+            QFile::setPermissions(dataDir, QFileDevice::ReadOwner | QFileDevice::WriteOwner | QFileDevice::ExeOwner);
+            QFile::setPermissions(databasePath(dataDir), QFileDevice::ReadOwner | QFileDevice::WriteOwner);
             blobs.emplace(dataDir);
             ctx.db = &db;
             ctx.blobs = &*blobs;
@@ -449,11 +507,16 @@ ScanResult runScan(const ScanOptions& options) {
                     pr.profileRowId = id;
                 }
             }
-            if (profileId) {
-                db.transaction();
-            }
             for (const InstalledExtension& ext : inv.extensions) {
-                ExtensionReport report = buildReport(ext, options.computeHashes);
+                QHash<QString, VersionRow> known;
+                if (profileId) {
+                    if (const std::optional<ExtensionRow> row = db.findExtension(*profileId, ext.id)) {
+                        for (const VersionRow& v : db.versionsForExtension(row->id)) {
+                            known.insert(v.dirName, v);
+                        }
+                    }
+                }
+                ExtensionReport report = buildReport(ext, options.computeHashes, options.settleSeconds, known);
                 if (profileId) {
                     persistExtension(ctx, *profileId, ext, report, br, profile, result.events);
                 }
@@ -461,12 +524,13 @@ ScanResult runScan(const ScanOptions& options) {
             }
             if (profileId) {
                 recordRemovals(ctx, *profileId, br, profile, result.events);
-                db.commit();
             }
             br.profiles.append(pr);
         }
         result.browsers.append(br);
     }
+
+    result.needsRescan = ctx.needsRescan;
 
     if (canPersist && options.analyze) {
         for (ScanEvent& ev : result.events) {
@@ -477,6 +541,21 @@ ScanResult runScan(const ScanOptions& options) {
             ev.maxSeverity = severityId(maxSeverity(ev.findings));
             ev.findingsSummary = findingsSummary(ev.findings);
         }
+        // Events left without findings by an earlier crash or interrupted run.
+        for (const EventRow& e : db.unanalyzedEvents(20)) {
+            analyzeEvent(db, *blobs, e.id);
+        }
+    }
+
+    // A directory that was still being written: wait for it to settle and look again.
+    if (result.needsRescan && options.settleRetries > 0) {
+        QThread::sleep(static_cast<unsigned>(qMax(1, options.settleSeconds)));
+        ScanOptions retry = options;
+        retry.settleRetries = options.settleRetries - 1;
+        ScanResult second = runScan(retry);
+        second.events = result.events + second.events;
+        second.warnings = result.warnings + second.warnings;
+        return second;
     }
     return result;
 }

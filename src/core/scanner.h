@@ -20,6 +20,8 @@ struct ScanOptions {
     bool persist = true;
     bool computeHashes = true;
     bool analyze = true;  // compute signatures and findings for new events
+    int settleSeconds = 3;  // a version directory modified more recently than this is still being written
+    int settleRetries = 2;  // how many times a scan waits and retries for unsettled directories
     std::optional<BrowserKind> onlyBrowser;
     QString onlyProfile;  // dir name or display name
 };
@@ -31,6 +33,9 @@ struct VersionReport {
     QString treeHash;  // hex, empty when hashing was skipped
     bool active = false;
     bool newlySeen = false;
+    bool settled = true;      // false: still being written, not archived this pass
+    bool reused = false;      // stat fingerprint matched the archive, hashing skipped
+    QString fingerprint;
     bool hasWebstoreMetadata = false;
     bool keyMatchesId = true;
     int fileCount = 0;
@@ -73,7 +78,7 @@ struct BrowserReport {
 };
 
 struct ScanEvent {
-    QString kind;  // baseline, updated, pending_version, enabled, disabled, removed
+    QString kind;  // baseline, updated, modified_in_place, pending_version, enabled, disabled, removed
     QString browserKind;
     QString browserName;
     QString profileDir;
@@ -100,6 +105,7 @@ struct ScanResult {
     QList<ScanEvent> events;
     QStringList warnings;
     QString dataDir;
+    bool needsRescan = false;  // an unsettled version directory was skipped
 
     int profileCount() const;
     int extensionCount() const;

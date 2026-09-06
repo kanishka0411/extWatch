@@ -52,6 +52,21 @@ const char* const kSchema[] = {
     "INSERT OR IGNORE INTO meta(key, value) VALUES ('schema_version', '1')",
 };
 
+// Migrations are applied in order inside a transaction; index i upgrades version i+1 to i+2.
+const QList<QStringList> kMigrations = {
+    // 1 -> 2: snapshot fingerprints and states, effective grants, quarantine records
+    {
+        QStringLiteral("ALTER TABLE versions ADD COLUMN stat_fingerprint TEXT"),
+        QStringLiteral("ALTER TABLE versions ADD COLUMN state TEXT NOT NULL DEFAULT 'complete'"),
+        QStringLiteral("ALTER TABLE extensions ADD COLUMN grants_json TEXT"),
+        QStringLiteral("CREATE TABLE IF NOT EXISTS quarantines ("
+                       " id TEXT PRIMARY KEY, extension_id INTEGER NOT NULL REFERENCES extensions(id),"
+                       " ext_id TEXT NOT NULL, browser_kind TEXT, user_data_dir TEXT, profile_dir TEXT,"
+                       " version TEXT, dir_name TEXT, tree_hash TEXT, original_path TEXT NOT NULL,"
+                       " quarantine_path TEXT NOT NULL, created_at INTEGER NOT NULL, state TEXT NOT NULL)"),
+    },
+};
+
 std::optional<qint64> optionalInt(const QVariant& v) {
     if (v.isNull() || !v.isValid()) {
         return std::nullopt;
@@ -97,6 +112,25 @@ ExtensionRow readExtension(const QSqlQuery& q) {
     r.firstSeen = q.value(7).toLongLong();
     r.lastSeen = q.value(8).toLongLong();
     r.currentVersionId = optionalInt(q.value(9));
+    r.grantsJson = q.value(10).toString();
+    return r;
+}
+
+QuarantineRow readQuarantine(const QSqlQuery& q) {
+    QuarantineRow r;
+    r.id = q.value(0).toString();
+    r.extensionId = q.value(1).toLongLong();
+    r.extId = q.value(2).toString();
+    r.browserKind = q.value(3).toString();
+    r.userDataDir = q.value(4).toString();
+    r.profileDir = q.value(5).toString();
+    r.version = q.value(6).toString();
+    r.dirName = q.value(7).toString();
+    r.treeHash = q.value(8).toString();
+    r.originalPath = q.value(9).toString();
+    r.quarantinePath = q.value(10).toString();
+    r.createdAt = q.value(11).toLongLong();
+    r.state = q.value(12).toString();
     return r;
 }
 
@@ -116,6 +150,8 @@ VersionRow readVersion(const QSqlQuery& q) {
     r.bytes = q.value(11).toLongLong();
     r.keyMatchesId = q.value(12).toBool();
     r.hasWebstoreMetadata = q.value(13).toBool();
+    r.statFingerprint = q.value(14).toString();
+    r.state = q.value(15).toString();
     return r;
 }
 
@@ -137,10 +173,14 @@ const char* const kBrowserCols = "id, kind, user_data_dir, display_name, first_s
 const char* const kProfileCols = "id, browser_id, dir_name, display_name, first_seen, last_seen";
 const char* const kExtensionCols =
     "id, profile_id, ext_id, name, location, from_webstore, enabled, first_seen, last_seen,"
-    " current_version_id";
+    " current_version_id, grants_json";
 const char* const kVersionCols =
     "id, extension_id, version, dir_name, tree_hash, first_seen, last_seen, activated_at,"
-    " manifest_json, signature_json, file_count, bytes, key_matches_id, has_webstore_metadata";
+    " manifest_json, signature_json, file_count, bytes, key_matches_id, has_webstore_metadata,"
+    " stat_fingerprint, state";
+const char* const kQuarantineCols =
+    "id, extension_id, ext_id, browser_kind, user_data_dir, profile_dir, version, dir_name, tree_hash,"
+    " original_path, quarantine_path, created_at, state";
 const char* const kEventCols =
     "id, extension_id, kind, from_version_id, to_version_id, at, max_severity, findings_json,"
     " acknowledged";
@@ -192,6 +232,27 @@ bool Database::open(const QString& filePath, QString* error) {
     return initSchema(error);
 }
 
+int Database::schemaVersion() {
+    QSqlQuery q(m_db);
+    q.prepare(QStringLiteral("SELECT value FROM meta WHERE key = 'schema_version'"));
+    if (exec(q) && q.next()) {
+        return q.value(0).toInt();
+    }
+    return 0;
+}
+
+bool Database::quickCheck(QString* report) {
+    QSqlQuery q(m_db);
+    if (!q.exec(QStringLiteral("PRAGMA quick_check")) || !q.next()) {
+        m_lastError = q.lastError().text();
+        if (report) *report = m_lastError;
+        return false;
+    }
+    const QString result = q.value(0).toString();
+    if (report) *report = result;
+    return result == QStringLiteral("ok");
+}
+
 bool Database::initSchema(QString* error) {
     for (const char* stmt : kSchema) {
         QSqlQuery q(m_db);
@@ -202,6 +263,41 @@ bool Database::initSchema(QString* error) {
             }
             return false;
         }
+    }
+    int version = schemaVersion();
+    if (version > kSchemaVersion) {
+        m_lastError = QStringLiteral("database schema %1 is newer than this ExtWatch understands (%2)")
+                          .arg(version).arg(kSchemaVersion);
+        if (error) {
+            *error = m_lastError;
+        }
+        return false;
+    }
+    while (version < kSchemaVersion) {
+        const QStringList& steps = kMigrations.at(version - 1);
+        if (!m_db.transaction()) {
+            m_lastError = m_db.lastError().text();
+            if (error) *error = m_lastError;
+            return false;
+        }
+        for (const QString& stmt : steps) {
+            QSqlQuery q(m_db);
+            if (!q.exec(stmt)) {
+                m_lastError = QStringLiteral("migration to schema %1 failed: %2").arg(version + 1).arg(q.lastError().text());
+                m_db.rollback();
+                if (error) *error = m_lastError;
+                return false;
+            }
+        }
+        QSqlQuery set(m_db);
+        set.prepare(QStringLiteral("UPDATE meta SET value = ? WHERE key = 'schema_version'"));
+        set.addBindValue(QString::number(version + 1));
+        if (!exec(set) || !m_db.commit()) {
+            m_db.rollback();
+            if (error) *error = m_lastError;
+            return false;
+        }
+        version++;
     }
     return true;
 }
@@ -302,7 +398,7 @@ qint64 Database::insertVersion(const VersionRow& r) {
     q.prepare(QStringLiteral(
         "INSERT INTO versions(extension_id, version, dir_name, tree_hash, first_seen, last_seen,"
         " activated_at, manifest_json, signature_json, file_count, bytes, key_matches_id,"
-        " has_webstore_metadata) VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)"));
+        " has_webstore_metadata, stat_fingerprint, state) VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)"));
     q.addBindValue(r.extensionId);
     q.addBindValue(r.version);
     q.addBindValue(r.dirName);
@@ -316,7 +412,25 @@ qint64 Database::insertVersion(const VersionRow& r) {
     q.addBindValue(r.bytes);
     q.addBindValue(r.keyMatchesId ? 1 : 0);
     q.addBindValue(r.hasWebstoreMetadata ? 1 : 0);
+    q.addBindValue(r.statFingerprint);
+    q.addBindValue(r.state.isEmpty() ? QStringLiteral("complete") : r.state);
     return exec(q) ? q.lastInsertId().toLongLong() : -1;
+}
+
+bool Database::setVersionFingerprint(qint64 versionId, const QString& fingerprint) {
+    QSqlQuery q(m_db);
+    q.prepare(QStringLiteral("UPDATE versions SET stat_fingerprint = ? WHERE id = ?"));
+    q.addBindValue(fingerprint);
+    q.addBindValue(versionId);
+    return exec(q);
+}
+
+bool Database::setExtensionGrants(qint64 extensionId, const QString& grantsJson) {
+    QSqlQuery q(m_db);
+    q.prepare(QStringLiteral("UPDATE extensions SET grants_json = ? WHERE id = ?"));
+    q.addBindValue(grantsJson);
+    q.addBindValue(extensionId);
+    return exec(q);
 }
 
 bool Database::touchVersion(qint64 versionId, qint64 now, bool activated) {
@@ -597,6 +711,112 @@ std::optional<EventRow> Database::eventById(qint64 id) {
         return readEvent(q);
     }
     return std::nullopt;
+}
+
+QList<EventRow> Database::unanalyzedEvents(int limit) {
+    QList<EventRow> out;
+    QSqlQuery q(m_db);
+    q.prepare(QStringLiteral("SELECT %1 FROM events WHERE to_version_id IS NOT NULL AND"
+                             " (max_severity IS NULL OR max_severity = '') AND"
+                             " kind IN ('baseline', 'updated', 'pending_version', 'modified_in_place')"
+                             " ORDER BY id LIMIT ?").arg(QLatin1StringView(kEventCols)));
+    q.addBindValue(limit);
+    if (exec(q)) {
+        while (q.next()) {
+            out.append(readEvent(q));
+        }
+    }
+    return out;
+}
+
+QList<EventRow> Database::allEvents() {
+    QList<EventRow> out;
+    QSqlQuery q(m_db);
+    q.prepare(QStringLiteral("SELECT %1 FROM events ORDER BY id").arg(QLatin1StringView(kEventCols)));
+    if (exec(q)) {
+        while (q.next()) {
+            out.append(readEvent(q));
+        }
+    }
+    return out;
+}
+
+QList<VersionRow> Database::allVersions() {
+    QList<VersionRow> out;
+    QSqlQuery q(m_db);
+    q.prepare(QStringLiteral("SELECT %1 FROM versions ORDER BY id").arg(QLatin1StringView(kVersionCols)));
+    if (exec(q)) {
+        while (q.next()) {
+            out.append(readVersion(q));
+        }
+    }
+    return out;
+}
+
+bool Database::insertQuarantine(const QuarantineRow& r) {
+    QSqlQuery q(m_db);
+    q.prepare(QStringLiteral(
+        "INSERT INTO quarantines(id, extension_id, ext_id, browser_kind, user_data_dir, profile_dir, version,"
+        " dir_name, tree_hash, original_path, quarantine_path, created_at, state)"
+        " VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)"));
+    q.addBindValue(r.id);
+    q.addBindValue(r.extensionId);
+    q.addBindValue(r.extId);
+    q.addBindValue(r.browserKind);
+    q.addBindValue(r.userDataDir);
+    q.addBindValue(r.profileDir);
+    q.addBindValue(r.version);
+    q.addBindValue(r.dirName);
+    q.addBindValue(r.treeHash);
+    q.addBindValue(r.originalPath);
+    q.addBindValue(r.quarantinePath);
+    q.addBindValue(r.createdAt);
+    q.addBindValue(r.state);
+    return exec(q);
+}
+
+bool Database::setQuarantineState(const QString& id, const QString& state) {
+    QSqlQuery q(m_db);
+    q.prepare(QStringLiteral("UPDATE quarantines SET state = ? WHERE id = ?"));
+    q.addBindValue(state);
+    q.addBindValue(id);
+    return exec(q);
+}
+
+std::optional<QuarantineRow> Database::quarantineById(const QString& id) {
+    QSqlQuery q(m_db);
+    q.prepare(QStringLiteral("SELECT %1 FROM quarantines WHERE id = ?").arg(QLatin1StringView(kQuarantineCols)));
+    q.addBindValue(id);
+    if (exec(q) && q.next()) {
+        return readQuarantine(q);
+    }
+    return std::nullopt;
+}
+
+QList<QuarantineRow> Database::quarantinesForExtension(qint64 extensionId) {
+    QList<QuarantineRow> out;
+    QSqlQuery q(m_db);
+    q.prepare(QStringLiteral("SELECT %1 FROM quarantines WHERE extension_id = ? ORDER BY created_at")
+                  .arg(QLatin1StringView(kQuarantineCols)));
+    q.addBindValue(extensionId);
+    if (exec(q)) {
+        while (q.next()) {
+            out.append(readQuarantine(q));
+        }
+    }
+    return out;
+}
+
+QList<QuarantineRow> Database::allQuarantines() {
+    QList<QuarantineRow> out;
+    QSqlQuery q(m_db);
+    q.prepare(QStringLiteral("SELECT %1 FROM quarantines ORDER BY created_at").arg(QLatin1StringView(kQuarantineCols)));
+    if (exec(q)) {
+        while (q.next()) {
+            out.append(readQuarantine(q));
+        }
+    }
+    return out;
 }
 
 }  // namespace extwatch
