@@ -792,7 +792,7 @@ QString findingsSummary(const QList<Finding>& findings, int maxItems) {
                 part.chop(1);
             }
             if (f.rule == QStringLiteral("host.all_urls")) {
-                part = QStringLiteral("+host access ") + part;
+                part = QStringLiteral("+host access ") + part.section(QStringLiteral(" grants"), 0, 0);
             } else if (f.rule == QStringLiteral("network.domain")) {
                 part = QStringLiteral("+talks to ") + part;
             } else if (f.rule == QStringLiteral("permission.sensitive")) {

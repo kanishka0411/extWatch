@@ -8,13 +8,17 @@ on:
 jobs:
   macos:
     runs-on: macos-14
+    env:
+      # secrets cannot be tested in step conditions directly; expose their presence as flags
+      HAS_CERT: ${{ secrets.MACOS_CERT_P12 != '' }}
+      HAS_NOTARY: ${{ secrets.APPLE_ID != '' }}
     steps:
       - uses: actions/checkout@v4
       - uses: jurplel/install-qt-action@v4
         with: { version: 6.8.3, arch: clang_64, cache: true }
       - run: brew install ninja
       - name: Import signing certificate
-        if: ${{ secrets.MACOS_CERT_P12 != '' }}
+        if: env.HAS_CERT == 'true'
         env:
           CERT_P12: ${{ secrets.MACOS_CERT_P12 }}
           CERT_PASSWORD: ${{ secrets.MACOS_CERT_PASSWORD }}
@@ -26,13 +30,13 @@ jobs:
           security import cert.p12 -k build.keychain -P "$CERT_PASSWORD" -T /usr/bin/codesign
           security set-key-partition-list -S apple-tool:,apple: -s -k ci build.keychain
       - name: Store notarization credentials
-        if: ${{ secrets.APPLE_ID != '' }}
+        if: env.HAS_NOTARY == 'true'
         run: xcrun notarytool store-credentials extwatch-notary --apple-id "${{ secrets.APPLE_ID }}" --team-id "${{ secrets.APPLE_TEAM_ID }}" --password "${{ secrets.APPLE_APP_PASSWORD }}"
       - name: Build dmg
         env:
           QT_PREFIX: ${{ env.QT_ROOT_DIR }}
           CODESIGN_IDENTITY: ${{ secrets.MACOS_CODESIGN_IDENTITY }}
-          NOTARY_PROFILE: ${{ secrets.APPLE_ID != '' && 'extwatch-notary' || '' }}
+          NOTARY_PROFILE: ${{ env.HAS_NOTARY == 'true' && 'extwatch-notary' || '' }}
         run: packaging/macos/build-dmg.sh
       - uses: actions/upload-artifact@v4
         with: { name: macos, path: dist/*.dmg }
